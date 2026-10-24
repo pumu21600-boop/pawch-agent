@@ -88,7 +88,7 @@ pub(crate) fn find_browser_exe() -> Result<PathBuf, String> {
         .into_iter()
         .find(|p| p.is_file())
         .ok_or_else(|| {
-            "找不到 Edge/Chrome/WebView2 运行时（设 AGENT_BROWSER_PATH 指到浏览器 exe 可用）".to_string()
+            "找不到 Edge/Chrome/WebView2 运行时（设 PAWCH_AGENT_BROWSER_PATH 指到浏览器 exe 可用）".to_string()
         })
 }
 

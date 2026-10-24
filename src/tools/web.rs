@@ -187,8 +187,9 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 /// SSRF 预检（N3 + 审计 12 收口）：拒绝指向环回/内网/链路本地的抓取目标。IP 字面量直接
 /// 判段；域名解析后逐个 IP 判段。**解析失败不放行**（fail-closed）：放行等于没检——
 /// 「公网域名解析到内网 IP」正是 SSRF 的主打法，本机查不到就无法验证归属。代理场景
-/// （DNS 在代理侧完成）本地确实可能查不到，显式设 AGENT_WEB_ALLOW_PRIVATE=1 放开。
-/// 本地 dev 要抓 127.0.0.1 也走这个开关（与 AGENT_WEB_DEBUG_DIR / AGENT_BROWSER_PATH 同款）。
+/// （DNS 在代理侧完成）本地确实可能查不到，显式设 PAWCH_AGENT_WEB_ALLOW_PRIVATE=1 放开。
+/// 本地 dev 要抓 127.0.0.1 也走这个开关（与 WEB_DEBUG_DIR / BROWSER_PATH 同款，均带
+/// PAWCH_AGENT_ 前缀、旧 AGENT_ 前缀回落一个版本）。
 async fn ensure_public_target(url: &str) -> Result<(), String> {
     if crate::config::env_pawch("WEB_ALLOW_PRIVATE").is_some() {
         return Ok(());
@@ -204,7 +205,7 @@ async fn ensure_public_target(url: &str) -> Result<(), String> {
                 return Err(format!(
                     "无法验证抓取目标：域名 {host} 解析失败（{e}）。\
                      为防内网穿透（SSRF）不放行解析不了的目标；\
-                     本地调试或代理场景可设 AGENT_WEB_ALLOW_PRIVATE=1 放开"
+                     本地调试或代理场景可设 PAWCH_AGENT_WEB_ALLOW_PRIVATE=1 放开"
                 ));
             }
         },
@@ -216,7 +217,7 @@ async fn ensure_public_target(url: &str) -> Result<(), String> {
         if is_private_ip(ip) {
             return Err(format!(
                 "拒绝抓取内网地址 {host}（{ip}）：web_fetch 不抓环回/内网/链路本地目标（SSRF 防护）。\
-                 本地调试可设 AGENT_WEB_ALLOW_PRIVATE=1 放开"
+                 本地调试可设 PAWCH_AGENT_WEB_ALLOW_PRIVATE=1 放开"
             ));
         }
     }
