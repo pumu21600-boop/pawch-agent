@@ -13,6 +13,8 @@ tauri = { version = "2", features = ["tray-icon", "unstable", "devtools"] }
 serde_json = "1"
 # ResizeDirection 在 tauri-runtime 里 re-export 不出来（tauri::ResizeDirection 不存在），无边框边缘拉伸要用
 tauri-runtime = "2"
+# 接住 tauri/wry 内部 log::error!（child webview 创建失败原来只 log 一声且无 logger 直接蒸发）
+log = { version = "0.4", features = ["std"] }
 
 [profile.release]
 strip = true

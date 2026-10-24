@@ -242,6 +242,27 @@ fn slog(msg: &str) {
     }
 }
 
+/// tauri/wry 内部错误（如 CreateWebview 失败）默认走 log::error! 且无 logger=直接蒸发；
+/// 接进 slog（2026-10-24 排查 child webview 静默失败时实锤：add_child 的 Ok 只代表
+/// 「已投递」，真失败在事件循环里只 log 一声，不装 logger 永远看不见）。
+struct SlogLogger;
+impl log::Log for SlogLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            slog(&format!("[tauri:{}] {}", record.level(), record.args()));
+        }
+    }
+    fn flush(&self) {}
+}
+
+fn install_logger() {
+    let _ = log::set_boxed_logger(Box::new(SlogLogger));
+    log::set_max_level(log::LevelFilter::Warn);
+}
+
 /// 单实例守卫：占住环回端口即视为本机唯一壳。
 /// 端口被占时读 PID 锁判断「占用者是不是另一个壳」：是 → 本实例退出（两个壳会抢
 /// 9223 CDP 端口，第二个的 webview 不可见也不可驱动）；不是（锁是死的/根本没有锁，
@@ -499,6 +520,9 @@ fn dispatch(app: &tauri::AppHandle, op: &Value) {
 }
 
 fn main() {
+    // tauri/wry 内部错误接进 slog（事件循环里 CreateWebview 失败只 log::error!，无 logger 会蒸发
+    // ——2026-10-24 内置浏览器 P0 排查实锤了这个盲区，错误码从此有尸检材料）
+    install_logger();
     // 单实例：两个壳会抢 9223，第二个直接退出（listener 需保活）
     let _guard = instance_guard();
 
