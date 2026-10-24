@@ -74,14 +74,22 @@ pub(super) async fn browser_screenshot(Query(q): Query<ScreenshotQuery>) -> Resu
 pub struct ScreenshotQuery {
     pub id: String,
     /// 调用方是不是壳里那个客户端（旧版前端不带 = true）。
-    pub native: Option<bool>,
+    /// 2026-10-25 修：原来是 Option<bool>——serde 只认 true/false，而前端帧图 URL 传
+    /// `native=0`（全仓唯一调用点），壳外客户端的帧请求一直 400、面板图永远裂
+    /// （此前被 child webview P0 盖住没走到）。改收字符串，0/1/true/false 都认。
+    pub native: Option<String>,
+}
+
+/// native 意图判定：显式 1/true，或壳客户端头。
+fn wants_native(q: &ScreenshotQuery, headers: &HeaderMap) -> bool {
+    matches!(q.native.as_deref(), Some("1") | Some("true")) || shell_header(headers)
 }
 
 /// GET /api/browser/frame?id= —— 面板帧：screencast 最新 JPEG，内存直出零 CDP
 /// 往返；无帧时后端回落 captureScreenshot（PNG）。前端 <img> 轮询源。
 /// `native=0`（壳外浏览器客户端）只拿帧，不因此显示壳里的 webview。
 pub(super) async fn browser_frame(headers: HeaderMap, Query(q): Query<ScreenshotQuery>) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
-    match crate::browser::panel_frame(&q.id, q.native.unwrap_or(false) || shell_header(&headers)).await {
+    match crate::browser::panel_frame(&q.id, wants_native(&q, &headers)).await {
         Ok((bytes, mime)) => Ok((
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, mime)],
