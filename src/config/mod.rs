@@ -17,12 +17,24 @@ pub mod settings_schema;
 /// （config.toml / settings.json / providers.json / prompts / web/dist / plugins / logs）
 /// 都落在 exe 同级。`cargo run` 与 `target\release\pawch-agent.exe` 直接跑时同级没有这些
 /// 目录，行为与从前（CARGO_MANIFEST_DIR）完全一致，开发流程不受影响。
+/// 2026-10-24 修：开发形态原来直接落编译期 CARGO_MANIFEST_DIR 绝对路径——仓库文件夹
+/// 一改名/挪窝（agent-copy → pawch-agent 实锤）烙的路径就死，服务起不来且无日志。
+/// 现在先按 exe 位置推仓库根（exe 在 `<repo>/target/<profile>/` 布局），推得出且像
+/// 仓库（有 config.toml）才用；测试 exe（target/debug/deps 多一层）与陌生布局仍回落
+/// 编译期目录，测试断言不变。
 pub fn app_root() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
         && (dir.join("config.toml").is_file() || dir.join("web").is_dir())
     {
         return dir.to_path_buf();
+    }
+    // 开发布局：exe 在 <repo>/target/<profile>/ 下，ancestors 第 3 个是仓库根
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(repo) = exe.ancestors().nth(3)
+        && repo.join("config.toml").is_file()
+    {
+        return repo.to_path_buf();
     }
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }

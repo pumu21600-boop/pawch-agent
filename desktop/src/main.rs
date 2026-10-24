@@ -160,16 +160,19 @@ fn win_start_resize(win: tauri::Window, dir: String) {
     let _ = win.start_resize_dragging(d);
 }
 
-/// 服务 exe 路径：desktop/ 的上一级就是仓库根 → `<repo>/target/release/pawch-agent.exe`
-/// （开发机布局；原稿多退了一级指向 Desktop\target\release，壳从来没能自己拉起过
-/// 服务——以前服务总是手动起着的，bug 一直被掩盖。start.bat 改靠壳保活后必须修）。
+/// 服务 exe 路径：按壳自身 exe 位置解析（desktop/ 的上一级就是仓库根 →
+/// `<repo>/target/release/pawch-agent.exe`）。2026-10-24 修：原实现烙编译期
+/// CARGO_MANIFEST_DIR 绝对路径——仓库文件夹一改名/挪窝烙的路径就死，壳拉不起
+/// 服务、看门狗 5s 退出；改 current_exe() 推导，跟着 exe 走。
 /// 打包分发时改为同级目录探测（留口）。
 fn service_exe() -> PathBuf {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(repo) = manifest.parent() {
-        let p = repo.join("target").join("release").join("pawch-agent.exe");
-        if p.is_file() {
-            return p;
+    // 壳 exe 在 <repo>/desktop/target/release/，ancestors 第 4 个就是仓库根
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(repo) = exe.ancestors().nth(4) {
+            let p = repo.join("target").join("release").join("pawch-agent.exe");
+            if p.is_file() {
+                return p;
+            }
         }
     }
     PathBuf::from("target/release/pawch-agent.exe")
@@ -197,6 +200,10 @@ fn ensure_service() -> Option<u32> {
     {
         use std::os::windows::process::CommandExt;
         match Command::new(&exe)
+            // 2026-10-24 修：必须带 --minimized（后台子进程入口，隐藏控制台直接跑服务）。
+            // 不带参数会落进「双击」语义——再 spawn 一个分离的 --minimized 子进程后还
+            // 打开一次系统默认浏览器（冷启动壳会平白弹个浏览器窗口到用户脸上）。
+            .arg("--minimized")
             // 2026-10-08 修：cwd 固定到 exe 所在目录（target/release），与服务自身
             // spawn_detached 的 current_dir(exe.parent()) 一致——原来多跳一级到
             // target/，两个拉起面的工作目录语义分叉（app_root 按 exe 路径兜住了主要
