@@ -3282,6 +3282,8 @@
     const key = curKey();
     const idxs = selectedTurnUserIndexes();
     if (!idxs.length) return;
+    // 删除类纪律：不可恢复的批量删除先弹确认（文件不动要说清，和回滚区分开）
+    if (!(await confirmAsk(`删除所选的 ${msgSelected.length} 条消息（涉及 ${idxs.length} 个问答对）？\n删除后不可恢复；工作区文件不受影响。`))) return;
     await ensureIdle(key);
     try {
       for (const i of idxs) await truncateRequest(key, i, 'delete_turn');
