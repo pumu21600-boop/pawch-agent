@@ -881,6 +881,13 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
                         }
                         send(json!({ "api_usage": { "prompt_tokens": prompt_tokens, "cached_tokens": cached_tokens } }))
                     }
+                    // 消息信息卡（2026-10-26）：核心层给的计时/模型画像，这里补上配置名
+                    // 再转前端（挂到正在流式的那条气泡上）
+                    AgentEvent::TurnStats { stats } => {
+                        let mut v = stats;
+                        v["config"] = json!(active_cfg.name.clone());
+                        send(json!({ "turn_stats": v }));
+                    }
                     // 会话落盘：核心循环每关键点推全量消息（不含 system），写盘即续命。
                     // brief 在落盘边界剥掉：模型上下文里留着（保缓存前缀），用户气泡
                     // 里不能有——会话文件就是界面回显的数据源（turn.rs 有完整纪律注释）

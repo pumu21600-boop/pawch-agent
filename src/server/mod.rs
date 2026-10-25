@@ -189,6 +189,7 @@ pub fn router(state: AppState, dist_dir: PathBuf) -> Router {
         .route("/api/sessions/transcript", get(session_transcript))
         .route("/api/sessions/meta", post(session_meta))
         .route("/api/sessions/fork", post(fork_session))
+        .route("/api/sessions/truncate", post(crate::server::sessions::truncate_session))
         .route("/api/sessions/batch", post(batch_sessions))
         .route("/api/workspace/picker", post(pick_workspace))
         .route("/api/workspace/remove", post(remove_workspace))

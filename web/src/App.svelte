@@ -129,6 +129,15 @@
   // 「已引导」轻提示，本轮结束清除；发完输入框立即可继续干别的）
   let guided = {}; // key → [{ text }]
 
+  // —— 消息操作（2026-10-26 用户需求批）——
+  // 回滚/删除共用服务端截断端点（/api/sessions/truncate，按文件里第 N 条 user 消息定位）；
+  // 编辑=停流→回滚到该消息之前→以新文本重发；多选用于批量删除与生成上下文摘录。
+  let editingMsg = null; // { id, text } 正在编辑的用户消息
+  let msgSelectMode = false;
+  let msgSelected = []; // 选中的消息 id
+  let statsModal = null; // 信息卡：正在展示的那条 assistant 消息
+  let ctxCopied = false; // 「已复制」轻提示（2s 自灭，不弹不落盘）
+
   const curKey = () => currentSessionId || '@new';
   // 刷新「当前会话」的三个镜像变量（切会话、流开始/结束时调用）
   function syncCur() {
@@ -2746,7 +2755,7 @@
   function queueOut(key, text, atts, convs = []) {
     const item = { id: nextId(), text, atts, convs };
     outbox = { ...outbox, [key]: [...(outbox[key] || []), item] };
-    pushMsg(key, { id: item.id, role: 'user', content: text, attachments: atts, convs, queued: true });
+    pushMsg(key, { id: item.id, role: 'user', content: text, attachments: atts, convs, queued: true, ts: Date.now() });
   }
 
   // 把「已经上屏的那条用户气泡」转成排队（服务端说这个会话在跑时用；不新增气泡）
@@ -2755,7 +2764,7 @@
     const hit = [...arr].reverse().find((m) => m.role === 'user' && m.content === text && !m.queued);
     const id = hit ? hit.id : nextId();
     updMsgs(key, (a) =>
-      hit ? a.map((m) => (m.id === id ? { ...m, queued: true } : m)) : [...a, { id, role: 'user', content: text, attachments: atts, convs, queued: true }]
+      hit ? a.map((m) => (m.id === id ? { ...m, queued: true } : m)) : [...a, { id, role: 'user', content: text, attachments: atts, convs, queued: true, ts: Date.now() }]
     );
     outbox = { ...outbox, [key]: [...(outbox[key] || []), { id, text, atts, convs }] };
     return id;
@@ -2786,13 +2795,13 @@
     if (opts.silentSteer) {
       updMsgs(key, (a) => [
         ...a.filter((m) => m.id !== opts.bubbleId),
-        { id: asstId, role: 'assistant', content: '', thinking: '', tools: [], streaming: true, workStartedAt: Date.now() },
+        { id: asstId, role: 'assistant', content: '', thinking: '', tools: [], streaming: true, workStartedAt: Date.now(), ts: Date.now() },
       ]);
     } else {
       updMsgs(key, (a) => [
         ...a.map((m) => (opts.bubbleId && m.id === opts.bubbleId ? { ...m, queued: false, steered: !!opts.steer, interrupted: !!opts.interrupt } : m)),
-        ...(hasBubble ? [] : [{ id: nextId(), role: 'user', content: text, attachments: atts, convs }]),
-        { id: asstId, role: 'assistant', content: '', thinking: '', tools: [], streaming: true, workStartedAt: Date.now() },
+        ...(hasBubble ? [] : [{ id: nextId(), role: 'user', content: text, attachments: atts, convs, ts: Date.now() }]),
+        { id: asstId, role: 'assistant', content: '', thinking: '', tools: [], streaming: true, workStartedAt: Date.now(), ts: Date.now() },
       ]);
     }
     const ac = new AbortController();
@@ -2873,11 +2882,11 @@
                 for (const m of d.turn.messages || []) {
                   const q = (sessionMsgs[skey] || []).find((x) => (x.queued || x.steered) && x.role === 'user' && x.content === m.content);
                   if (q) updMsgs(skey, (a) => a.map((x) => (x.id === q.id ? { ...x, queued: false } : x)));
-                  else adds.push({ id: nextId(), role: 'user', content: m.content });
+                  else adds.push({ id: nextId(), role: 'user', content: m.content, ts: m.ts || Date.now() });
                 }
                 const nid = nextId();
                 stream.asstId = nid;
-                updMsgs(skey, (a) => [...a, ...adds, { id: nid, role: 'assistant', content: '', thinking: '', tools: [], streaming: true, workStartedAt: Date.now() }]);
+                updMsgs(skey, (a) => [...a, ...adds, { id: nid, role: 'assistant', content: '', thinking: '', tools: [], streaming: true, workStartedAt: Date.now(), ts: Date.now() }]);
               } else if (d.content) {
                 // 正文 = 本段思考结束：把这段的跨度累进总时长并停表（实时数字不再走）。
                 // **不能清计时锚点 了事**——真渠道的思考常以少量大分片到达，按「分片间隔」
@@ -2904,7 +2913,7 @@
                 const add = [];
                 for (const m of d.steer.messages || []) {
                   if (localSteers.length > 0 && localSteers[0] === m.content) localSteers.shift();
-                  else if (m.interrupted) add.push({ id: nextId(), role: 'user', content: m.content, interrupted: true });
+                  else if (m.interrupted) add.push({ id: nextId(), role: 'user', content: m.content, interrupted: true, ts: m.ts || Date.now() });
                   else guided = { ...guided, [skey]: [...(guided[skey] || []), { text: m.content }] };
                 }
                 if (add.length) updMsgs(skey, (a) => [...a, ...add]);
@@ -2985,6 +2994,9 @@
                   [skey]: { ctx: (usageBySession[skey] || {}).ctx || ctxUsage, api },
                 };
                 if (skey === curKey()) apiTotals = api;
+              } else if (d.turn_stats) {
+                // 消息信息卡（2026-10-26）：计时/渠道/模型挂到正在流式的那条回答上
+                patch((m) => ({ ...m, stats: { ...(m.stats || {}), ...d.turn_stats } }));
               } else if (d.step_limit) {
                 patch(endTurn);
                 pushMsg(skey, { id: nextId(), role: 'error', content: `已达步数上限 ${d.step_limit}，本轮先停在这（进度都在，重启不丢）——回复「继续」我会接着跑；想一次跑完更多，去 config.toml 把 max_steps 调大或设 0（不限）` });
@@ -3107,6 +3119,180 @@
     const q = currentSessionId ? `?session=${encodeURIComponent(currentSessionId)}` : '';
     fetch('/cancel' + q, { method: 'POST' });
     if (controller) controller.abort();
+  }
+
+  // —— 消息操作（回滚/编辑/删除/多选，2026-10-26 用户需求批）——
+  function fmtTs(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  function fmtMs(ms) {
+    if (ms == null) return '—';
+    return ms >= 1000 ? (ms / 1000).toFixed(1) + ' 秒' : ms + ' ms';
+  }
+
+  // 会话在跑就先停（编辑的前提：上下文要改写，继续输出没有意义），等服务端收尾
+  async function ensureIdle(key) {
+    if (!streams[key]) return;
+    if (key === curKey()) stop();
+    else {
+      const q = key === '@new' ? '' : `?session=${encodeURIComponent(key)}`;
+      fetch('/cancel' + q, { method: 'POST' });
+    }
+    for (let i = 0; i < 100; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (!streams[key]) return;
+    }
+  }
+
+  // 服务端截断（409=服务端还在收尾，退避重试）
+  async function truncateRequest(key, userIndex, mode) {
+    for (let i = 0; i < 25; i++) {
+      const r = await fetch('/api/sessions/truncate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: key, user_index: userIndex, mode }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) return d;
+      if (r.status !== 409) throw new Error(d.error || `HTTP ${r.status}`);
+      await new Promise((res) => setTimeout(res, 400));
+    }
+    throw new Error('会话还在收尾，稍后再试');
+  }
+
+  // 目标消息在会话文件里的「第几条 user 消息」序数（0 基）。
+  // 前端视图比文件多出排队气泡（没发出去）与检查点行（纯前端）——排除 queued 即对齐；
+  // 引导消息（steered）在文件里真有一条 user，必须计入。
+  function fileUserIndex(key, m) {
+    const arr = sessionMsgs[key] || [];
+    const at = arr.findIndex((x) => x.id === m.id);
+    let n = 0;
+    for (let k = 0; k < at; k++) {
+      const x = arr[k];
+      if (x.role === 'user' && !x.queued) n++;
+    }
+    return n;
+  }
+
+  // 从服务端重拉当前会话视图（截断后以文件为真源自愈）
+  async function reloadSessionView(key) {
+    const r = await fetch(`/api/session?id=${encodeURIComponent(key)}`).then((x) => x.json());
+    sessionMsgs = { ...sessionMsgs, [key]: rebuildFromSession(r.messages || []) };
+    syncCur();
+    loadSessions();
+  }
+
+  async function rollbackMsg(m) {
+    const key = curKey();
+    editingMsg = null;
+    await ensureIdle(key);
+    try {
+      await truncateRequest(key, fileUserIndex(key, m), 'rollback');
+      await reloadSessionView(key);
+    } catch (e) {
+      pushMsg(key, { id: nextId(), role: 'error', content: `[回滚失败] ${e.message || e}` });
+    }
+  }
+
+  async function deleteMsg(m) {
+    const key = curKey();
+    await ensureIdle(key);
+    try {
+      await truncateRequest(key, fileUserIndex(key, m), 'delete_turn');
+      await reloadSessionView(key);
+    } catch (e) {
+      pushMsg(key, { id: nextId(), role: 'error', content: `[删除失败] ${e.message || e}` });
+    }
+  }
+
+  function beginEdit(m) {
+    editingMsg = { id: m.id, text: m.content };
+  }
+
+  async function saveEdit() {
+    const key = curKey();
+    const text = (editingMsg?.text || '').trim();
+    const target = (sessionMsgs[key] || []).find((x) => x.id === editingMsg?.id);
+    editingMsg = null;
+    if (!text || !target) return;
+    await ensureIdle(key);
+    try {
+      await truncateRequest(key, fileUserIndex(key, target), 'rollback');
+      await reloadSessionView(key);
+      // 编辑后的文本走正常发送路（时间戳/流式/落盘全在既有链路上）
+      await deliver(key, text, [], {});
+    } catch (e) {
+      pushMsg(key, { id: nextId(), role: 'error', content: `[编辑重发失败] ${e.message || e}` });
+    }
+  }
+
+  function enterSelect() {
+    msgSelectMode = true;
+    msgSelected = [];
+    editingMsg = null;
+  }
+  function exitSelect() {
+    msgSelectMode = false;
+    msgSelected = [];
+  }
+  function toggleSelect(id) {
+    msgSelected = msgSelected.includes(id) ? msgSelected.filter((x) => x !== id) : [...msgSelected, id];
+  }
+
+  // 选中消息所属问答对的 user 序数（assistant 行挂到它前面最近的那条 user）
+  function selectedTurnUserIndexes() {
+    const key = curKey();
+    const arr = sessionMsgs[key] || [];
+    const idxs = new Set();
+    for (const id of msgSelected) {
+      const at = arr.findIndex((x) => x.id === id);
+      if (at < 0) continue;
+      let anchor = null;
+      for (let k = at; k >= 0; k--) {
+        if (arr[k].role === 'user' && !arr[k].queued) {
+          anchor = arr[k];
+          break;
+        }
+      }
+      if (anchor) idxs.add(fileUserIndex(key, anchor));
+    }
+    return [...idxs].sort((a, b) => b - a); // 从后往前删，前面的序数不漂移
+  }
+
+  async function deleteSelected() {
+    const key = curKey();
+    const idxs = selectedTurnUserIndexes();
+    if (!idxs.length) return;
+    await ensureIdle(key);
+    try {
+      for (const i of idxs) await truncateRequest(key, i, 'delete_turn');
+      exitSelect();
+      await reloadSessionView(key);
+    } catch (e) {
+      pushMsg(key, { id: nextId(), role: 'error', content: `[删除所选失败] ${e.message || e}` });
+    }
+  }
+
+  // 生成上下文摘录：按对话顺序拼 markdown，进剪贴板——用户去别的对话粘贴即可当参考
+  async function copySelectedAsContext() {
+    const key = curKey();
+    const arr = sessionMsgs[key] || [];
+    const picked = arr.filter((m) => msgSelected.includes(m.id) && (m.role === 'user' || m.role === 'assistant'));
+    if (!picked.length) return;
+    const lines = [`【上下文摘录】来自对话「${currentTitle || '未命名'}」（${new Date().toLocaleString()}）`, ''];
+    for (const m of picked) {
+      lines.push(m.role === 'user' ? `【用户】${m.content}` : `【助手】${m.content}`);
+    }
+    try {
+      await putClipboard(lines.join('\n\n'));
+      ctxCopied = true;
+      setTimeout(() => (ctxCopied = false), 2000);
+    } catch (e) {
+      pushMsg(key, { id: nextId(), role: 'error', content: `[复制失败] ${e.message || e}` });
+    }
   }
 
   // 服务端接管排队消息后的对账（2026-09-27）：本页的 SSE 流已死，服务端跑这条消息时
@@ -3711,7 +3897,7 @@
     for (const m of msgs) {
       if (m.role === 'user') {
         // steered=引导消息（2026-10-22）：渲染成「已引导」轻量行，不占气泡位
-        out.push({ id: nextId(), role: 'user', content: contentText(m.content), steered: !!m.steered, interrupted: !!m.interrupted });
+        out.push({ id: nextId(), role: 'user', content: contentText(m.content), steered: !!m.steered, interrupted: !!m.interrupted, ts: m.ts });
       } else if (m.role === 'assistant') {
         const asst = {
           id: nextId(),
@@ -3731,11 +3917,14 @@
           workMs: m.work_ms || 0,
           stepMs: m.step_ms || 0,
           thinkMs: m.reasoning_ms || 0,
+          // 信息卡数据（渠道/模型/首包/耗时/tokens）与发送时间随消息落盘
+          stats: m.stats || null,
+          ts: m.ts,
         };
         out.push(asst);
       } else if (m.role === 'system') {
         // 通知/错误随会话落盘（display_only），重启/切回会话后气泡还在
-        out.push({ id: nextId(), role: 'system', content: contentText(m.content) });
+        out.push({ id: nextId(), role: 'system', content: contentText(m.content), ts: m.ts });
       } else if (m.role === 'tool') {
         const asst = [...out].reverse().find(
           (x) => x.role === 'assistant' && (x.tools || []).some((t) => t.id === m.tool_call_id)
@@ -5536,7 +5725,34 @@
             </div>
           {:else}
           <div class="msg user">
-            <div class="bubble user-bubble">
+            {#if msgSelectMode && !m.queued}
+              <label class="msg-check" title="选中这条消息">
+                <input type="checkbox" checked={msgSelected.includes(m.id)} on:change={() => toggleSelect(m.id)} />
+              </label>
+            {/if}
+            {#if editingMsg && editingMsg.id === m.id}
+              <!-- 编辑态：原位变输入框；保存=回滚到这条之前+以新文本重发（先停输出） -->
+              <div class="bubble user-bubble edit-box">
+                <textarea class="edit-area" bind:value={editingMsg.text} rows="3"></textarea>
+                <div class="edit-actions">
+                  <button class="btn primary" on:click={saveEdit}>保存并重发</button>
+                  <button class="btn ghost" on:click={() => (editingMsg = null)}>取消</button>
+                  <span class="edit-hint">保存会先停止正在跑的输出</span>
+                </div>
+              </div>
+            {:else}
+              {#if !msgSelectMode && !m.queued}
+                <div class="msg-side user-side">
+                  {#if m.ts}<span class="msg-ts">{fmtTs(m.ts)}</span>{/if}
+                  <span class="msg-acts">
+                    <button class="msg-act" title="回滚：删掉这条和它之后的所有消息，回到它之前" on:click={() => rollbackMsg(m)}>回滚</button>
+                    <button class="msg-act" title="编辑并重发（会先停止正在跑的输出）" on:click={() => beginEdit(m)}>编辑</button>
+                    <button class="msg-act" title="删除这一问一答（后面的历史保留）" on:click={() => deleteMsg(m)}>删除</button>
+                    <button class="msg-act" title="多选消息：批量删除或生成上下文摘录" on:click={enterSelect}>多选</button>
+                  </span>
+                </div>
+              {/if}
+              <div class="bubble user-bubble">
               {#if m.attachments && m.attachments.length > 0}
                 <div class="msg-attachments">
                   {#each m.attachments as a}
@@ -5583,10 +5799,16 @@
                 <div class="queued-row"><span class="queued-badge steered">已中断当前操作并立即发送</span></div>
               {/if}
             </div>
+            {/if}
           </div>
           {/if}
         {:else if m.role === 'assistant'}
           <div class="msg assistant">
+            {#if msgSelectMode && !m.streaming}
+              <label class="msg-check" title="选中这条回复">
+                <input type="checkbox" checked={msgSelected.includes(m.id)} on:change={() => toggleSelect(m.id)} />
+              </label>
+            {/if}
             <div class="bubble asst-bubble">
               {#if m.workStartedAt || m.workMs}
                 <div class="work-line">
@@ -5699,6 +5921,15 @@
               {/if}
               {#if m.streaming && m.content}<span class="cursor"></span>{/if}
             </div>
+            <div class="msg-side asst-side">
+              {#if m.ts}<span class="msg-ts">{fmtTs(m.ts)}</span>{/if}
+              {#if m.stats && !m.streaming}
+                <!-- 信息卡入口：首 token 延迟/输出耗时/渠道/模型/tokens/缓存命中 -->
+                <button class="msg-act" title="这条回复的详细信息" on:click={() => (statsModal = m)}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>
+                </button>
+              {/if}
+            </div>
           </div>
         {:else if m.role === 'error'}
           <!-- 报错条：紧凑一行式（用户 2026-10-26：整块大卡太难看），左对齐小字，
@@ -5719,6 +5950,18 @@
     {/if}
 
     <footer class="chat-input">
+      <!-- 多选操作条：必须放 footer 内部（输入框是绝对定位浮层，放普通流里整条被
+           盖住、按钮看得见点不着——subagent-strip 同款坑，2026-10-26 实测抓到） -->
+      {#if msgSelectMode}
+        <div class="select-bar">
+          <span>已选 {msgSelected.length} 条</span>
+          <button class="btn" disabled={!msgSelected.length} on:click={deleteSelected}>删除所选</button>
+          <button class="btn" disabled={!msgSelected.length} on:click={copySelectedAsContext}>复制为上下文</button>
+          {#if ctxCopied}<span class="select-copied">已复制，去别的对话粘贴即可</span>{/if}
+          <span class="select-flex"></span>
+          <button class="btn ghost" on:click={exitSelect}>退出多选</button>
+        </div>
+      {/if}
       <!-- 子代理实时条（主区、输入框上方；用户拍板不落侧边栏）。必须放在 footer 里：
            输入框是 position:absolute 浮层，放它外面（普通流）会被整个盖住（实测 y 重叠
            82px，命中测试全落到 composer 上）。footer 子元素自带 pointer-events:auto。
@@ -7033,6 +7276,29 @@
   />
 
 <ImagePreview src={previewImageModal} on:close={() => (previewImageModal = null)} />
+
+{#if statsModal}
+  <!-- 消息信息卡（2026-10-26）：这条回复从哪来、多快、多少 token -->
+  <div class="modal-backdrop" on:click={() => (statsModal = null)}>
+    <div class="modal stats-modal" on:click|stopPropagation>
+      <div class="modal-head">
+        <b>这条回复的信息</b>
+        <button class="btn ghost" on:click={() => (statsModal = null)}>关闭</button>
+      </div>
+      <div class="stats-grid">
+        <span>模型</span><b>{statsModal.stats?.model || '—'}</b>
+        <span>来源配置</span><b>{statsModal.stats?.config || '—'}</b>
+        <span>供应商</span><b>{statsModal.stats?.provider_id || '—'}</b>
+        <span>首 token 延迟</span><b>{fmtMs(statsModal.stats?.ttft_ms)}</b>
+        <span>输出耗时</span><b>{fmtMs(statsModal.stats?.gen_ms)}</b>
+        <span>输出速度</span><b>{statsModal.stats?.completion_tokens && statsModal.stats?.gen_ms ? (statsModal.stats.completion_tokens / (statsModal.stats.gen_ms / 1000)).toFixed(1) + ' tokens/秒' : '—'}</b>
+        <span>输入 tokens</span><b>{statsModal.stats?.prompt_tokens ?? '—'}</b>
+        <span>输出 tokens</span><b>{statsModal.stats?.completion_tokens ?? '—'}</b>
+        <span>缓存输入</span><b>{statsModal.stats?.cached_tokens ?? '—'}{statsModal.stats?.prompt_tokens > 0 && statsModal.stats?.cached_tokens != null ? `（命中 ${Math.round((statsModal.stats.cached_tokens / statsModal.stats.prompt_tokens) * 100)}%）` : ''}</b>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if galaxyOpen}
   <!-- 记忆库星云：光点 = 会话；搜索 = 向量检索过滤 -->
@@ -9192,6 +9458,133 @@
   }
   .error-row {
     justify-content: flex-start;
+  }
+  /* —— 消息操作/边缘时间/多选/信息卡（2026-10-26 用户需求批）—— */
+  .msg-side {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    align-self: center;
+    max-width: 10%;
+  }
+  .user-side {
+    margin-right: 8px;
+    justify-content: flex-end;
+  }
+  .asst-side {
+    margin-left: 8px;
+  }
+  .msg-ts {
+    font-size: 11px;
+    color: var(--g4);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .msg-acts {
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+  .msg:hover .msg-acts {
+    opacity: 1;
+  }
+  .msg-act {
+    border: none;
+    background: transparent;
+    color: var(--g4);
+    font-size: 11px;
+    padding: 2px 5px;
+    border-radius: 6px;
+    cursor: pointer;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .msg-act:hover {
+    background: var(--g2);
+    color: var(--g7);
+  }
+  .msg-act svg {
+    width: 13px;
+    height: 13px;
+    display: block;
+  }
+  .msg-check {
+    display: flex;
+    align-items: center;
+    margin-right: 8px;
+    align-self: center;
+    flex-shrink: 0;
+  }
+  .msg-check input {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+  }
+  .edit-box {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .edit-area {
+    width: 100%;
+    background: var(--g1);
+    color: var(--g7);
+    border: 1px solid var(--g3);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13.5px;
+    line-height: 1.55;
+    resize: vertical;
+    min-height: 64px;
+    box-sizing: border-box;
+    font-family: inherit;
+  }
+  .edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .edit-hint {
+    font-size: 11px;
+    color: var(--g4);
+  }
+  .select-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 24px;
+    border-top: 1px solid var(--g2);
+    background: var(--g1);
+    font-size: 12.5px;
+    color: var(--g6);
+  }
+  .select-flex {
+    flex: 1;
+  }
+  .select-copied {
+    color: var(--tint-green-fg);
+  }
+  .stats-modal {
+    width: min(430px, 92vw);
+  }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 108px 1fr;
+    gap: 9px 14px;
+    padding: 14px 4px 6px;
+    font-size: 13px;
+    align-content: start;
+  }
+  .stats-grid > span {
+    color: var(--g4);
+  }
+  .stats-grid > b {
+    color: var(--g7);
+    font-weight: 500;
+    word-break: break-all;
+    font-variant-numeric: tabular-nums;
   }
   .error-bubble {
     background: var(--tint-red-bg);

@@ -464,6 +464,49 @@ impl SessionManager {
         self.write(&f)
     }
 
+    /// 会话截断（2026-10-26 消息操作：回滚/编辑重发/删除问答对共用）。
+    /// `user_index` = 文件里第 N 条 user 消息（0 基）；mode：
+    /// - "rollback"：删第 N 条 user 及其后全部（回到它之前）
+    /// - "delete_turn"：删第 N 条 user + 紧随的 assistant/tool 串（这一问答对）
+    /// 返回截断后的消息总数；找不到第 N 条 user 或会话不存在时报错。
+    /// 锁内读-改-写：与 Snapshot 落盘/Snapshot 事件互斥（server 层已先挡掉在跑的会话）。
+    pub fn truncate(&self, id: &str, user_index: usize, mode: &str) -> anyhow::Result<usize> {
+        let lock = self.session_lock(id);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut f) = self.get(id) else {
+            anyhow::bail!("会话不存在: {id}");
+        };
+        let mut start: Option<usize> = None;
+        let mut count = 0usize;
+        for (i, m) in f.messages.iter().enumerate() {
+            if m.get("role").and_then(serde_json::Value::as_str) == Some("user") {
+                if count == user_index {
+                    start = Some(i);
+                    break;
+                }
+                count += 1;
+            }
+        }
+        let Some(start) = start else {
+            anyhow::bail!("找不到第 {user_index} 条用户消息");
+        };
+        let end = if mode == "rollback" {
+            f.messages.len()
+        } else {
+            let mut e = start + 1;
+            while e < f.messages.len()
+                && matches!(f.messages[e].get("role").and_then(serde_json::Value::as_str), Some("assistant") | Some("tool"))
+            {
+                e += 1;
+            }
+            e
+        };
+        f.messages.drain(start..end);
+        let n = f.messages.len();
+        self.write(&f)?;
+        Ok(n)
+    }
+
     /// 同项目（workspace 相同）里最近更新的一条已落盘会话，排除 current_id。
     /// 新会话开场「上次做到哪」的来源；没有则返回 None。
     pub fn previous_in_workspace(&self, workspace: &str, current_id: &str) -> Option<SessionFile> {

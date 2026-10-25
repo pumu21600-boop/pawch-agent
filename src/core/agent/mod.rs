@@ -43,6 +43,10 @@ pub enum AgentEvent {
     ContextUsage { pressure: Option<u64>, projected: u64, window: u64, breakdown: context::Breakdown },
     /// 渠道返回的真实用量（：缓存命中率累计 + 预算钩子 + 圆环锚点更新）。
     ApiUsage { prompt_tokens: u64, cached_tokens: Option<u64> },
+    /// 本步模型调用的计时/渠道画像（2026-10-26 消息信息卡）：首包延迟、输出耗时、
+    /// completion tokens、实际用的渠道与模型（降级链取成功那个）。server 层补上
+    /// 配置名后转前端；同时随 assistant 消息落 stats 进会话文件（切回可看）。
+    TurnStats { stats: Value },
     /// 会话快照：当前全量消息（不含 system），server 收到即落盘
     Snapshot { messages: Vec<Value> },
     /// 提示性通知（：自动 HANDOFF 等），前端以系统消息展示
@@ -172,10 +176,19 @@ pub enum LoopOutcome {
     Cancelled,
 }
 
+/// 消息时间戳（毫秒）：落盘进会话文件、前端「边缘时间」显示用。
+/// 出网关前由适配器的消息白名单剥掉，模型永远看不到。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 渠道链调用（从 run_task 抽出，续写复用同一套）：主渠道当轮失败按序换 fallback
 /// 重试同一步；取消置位立即停（不降级）。流式增量原样转发 on_event；换渠道时先发
-/// StepReset（前端丢半截内容）+ 人话提示。返回 (结果, 提示文本)——提示已实时转发过，
-/// 调用方负责 persist_notice 补进上下文落盘（重启后气泡还在）。
+/// StepReset（前端丢半截内容）+ 人话提示。返回 (结果, 提示文本, 实际用的渠道)——
+/// 提示已实时转发过，调用方负责 persist_notice 补进上下文落盘（重启后气泡还在）。
 #[allow(clippy::too_many_arguments)]
 async fn run_chain(
     gateway: &Arc<Gateway>,
@@ -187,9 +200,12 @@ async fn run_chain(
     usage_ctx: &UsageCtx,
     step: u32,
     on_event: &(impl Fn(AgentEvent) + Send + Sync),
-) -> (anyhow::Result<ChatOutcome>, Vec<String>) {
+) -> (anyhow::Result<ChatOutcome>, Vec<String>, Option<Channel>) {
     let mut notices = Vec::new();
     let mut outcome = Err(anyhow::anyhow!("渠道链为空"));
+    // 本步实际用的渠道：每次尝试前登记，成功即它（信息卡「来源渠道」的口径——
+    // 主渠道失败走降级链时，报的必须是真的用过的那个，不能报链头充数）
+    let mut used: Option<Channel> = None;
     // 本步当前这次尝试已经推给前端的字符数（UTF-16 码元，与 JS String.length 同口径）。
     // 换渠道重试时前端要按这个数把半截内容丢掉——否则界面会出现「半截 + 完整」叠着显示。
     let streamed_content = std::sync::atomic::AtomicUsize::new(0);
@@ -209,6 +225,7 @@ async fn run_chain(
             on_event(AgentEvent::Notice(note.clone()));
             notices.push(note);
         }
+        used = Some((*ch).clone());
         outcome = gateway
             .stream_chat(usage_ctx, ch, &Value::Array(ctx.to_vec()), tools_def, cancel, Some(interrupt), |chunk| {
                 let delta = extract_delta(chunk);
@@ -232,11 +249,11 @@ async fn run_chain(
         match &outcome {
             Ok(ChatOutcome::Done(_)) => break,
             Ok(ChatOutcome::Interrupted(_)) => break, // 打断不是错误，不降级——半截落地后本轮继续
-            Ok(ChatOutcome::Cancelled) => return (outcome, notices),
+            Ok(ChatOutcome::Cancelled) => return (outcome, notices, used),
             Err(_) => continue, // 换下一个渠道
         }
     }
-    (outcome, notices)
+    (outcome, notices, used)
 }
 
 /// 通知持久化：通知以 display_only 消息进上下文——随 Snapshot 落盘，重启/切回
@@ -448,9 +465,9 @@ pub async fn run_task(
                 .iter()
                 .map(|s| match s.mode {
                     crate::core::steer::SteerMode::Interrupt => {
-                        json!({ "role": "user", "content": s.text, "interrupted": true })
+                        json!({ "role": "user", "content": s.text, "interrupted": true, "ts": now_ms() })
                     }
-                    _ => json!({ "role": "user", "content": s.text, "steered": true }),
+                    _ => json!({ "role": "user", "content": s.text, "steered": true, "ts": now_ms() }),
                 })
                 .collect();
             observability::event(
@@ -557,7 +574,7 @@ pub async fn run_task(
         // 降级提示是 display_only，计价 0，不会让估价失真）。拿到实报时与它配对成新锚点
         let est_at_request = est_total;
         let call_started = std::time::Instant::now();
-        let (outcome, chain_notices) = run_chain(
+        let (outcome, chain_notices, used_channel) = run_chain(
             gateway,
             &chain,
             &msgs,
@@ -587,13 +604,35 @@ pub async fn run_task(
                 // 落地（有内容才落），**本轮继续**：下一个决策点（循环顶部
                 // take_steering）取走打断指令，模型带着「自己的半截回答 + 新指令」继续。
                 if !t.content.trim().is_empty() {
-                    msgs.push(json!({ "role": "assistant", "content": t.content }));
+                    msgs.push(json!({ "role": "assistant", "content": t.content, "ts": now_ms() }));
                     on_event(AgentEvent::Snapshot { messages: snapshot_msgs(&msgs) });
                 }
                 continue;
             }
             ChatOutcome::Done(t) => t,
         };
+
+        // 消息信息卡数据（2026-10-26）：本步实际用的渠道（降级链取成功那个）+ 流式计时。
+        // 随 assistant 消息落 stats 进会话文件（刷新/切回还能看），TurnStats 事件转前端
+        // 给正在流式的那条气泡实时挂上（server 层再补配置名）。
+        let used_model = used_channel
+            .as_ref()
+            .map(|c| c.model.clone())
+            .unwrap_or_else(|| primary.model.clone());
+        let used_provider = used_channel
+            .as_ref()
+            .and_then(|c| c.params.provider_id.clone())
+            .or_else(|| primary.params.provider_id.clone());
+        let turn_stats = json!({
+            "ttft_ms": turn.ttft_ms(call_started),
+            "gen_ms": turn.gen_ms(),
+            "completion_tokens": turn.completion_tokens,
+            "prompt_tokens": turn.prompt_tokens,
+            "cached_tokens": turn.cached_tokens,
+            "model": used_model,
+            "provider_id": used_provider,
+        });
+        on_event(AgentEvent::TurnStats { stats: turn_stats.clone() });
 
         // 渠道真实用量：锚点更新 + 缓存行累计在回复落地后报（见下面两处 report_api_usage），
         // 这样服务端那一次 usage 落盘就是含本条回复的终态。
@@ -662,11 +701,12 @@ pub async fn run_task(
             // 随消息持久化，前端切回会话时恢复；回放侧由 replay.rs 按渠道契约决定去留）
             // 顺带落时长：「工作用时」（整轮）与「思考 · 持续了」
             // （本步 reasoning 分片首尾差）——刷新/切回会话后这两个数字还在
-            let mut final_msg = json!({ "role": "assistant", "content": final_text });
+            let mut final_msg = json!({ "role": "assistant", "content": final_text, "ts": now_ms() });
             if !turn.reasoning.is_empty() {
                 final_msg["reasoning_content"] = json!(turn.reasoning);
             }
             final_msg["work_ms"] = json!(task_started.elapsed().as_millis() as u64);
+            final_msg["stats"] = turn_stats.clone();
             if let Some(ms) = turn.reasoning_ms() {
                 final_msg["reasoning_ms"] = json!(ms);
             }
@@ -707,9 +747,9 @@ pub async fn run_task(
                     .iter()
                     .map(|s| match s.mode {
                         crate::core::steer::SteerMode::Interrupt => {
-                            json!({ "role": "user", "content": s.text, "interrupted": true })
+                            json!({ "role": "user", "content": s.text, "interrupted": true, "ts": now_ms() })
                         }
-                        _ => json!({ "role": "user", "content": s.text, "steered": true }),
+                        _ => json!({ "role": "user", "content": s.text, "steered": true, "ts": now_ms() }),
                     })
                     .collect();
                 observability::event(
@@ -762,6 +802,8 @@ pub async fn run_task(
             "role": "assistant",
             "content": if turn.content.is_empty() { Value::Null } else { json!(turn.content) },
             "tool_calls": calls_json,
+            "ts": now_ms(),
+            "stats": turn_stats.clone(),
         });
         if !turn.reasoning.is_empty()
             && primary.params.thinking.as_deref() != Some("off")

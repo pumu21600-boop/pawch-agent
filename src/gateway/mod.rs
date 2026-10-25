@@ -276,6 +276,12 @@ pub struct AssistantTurn {
     /// 思考流的时间跨度：首个 reasoning 分片与最后一个分片的到达时刻（「思考 · 持续了 N 秒」用）
     pub reasoning_first_at: Option<std::time::Instant>,
     pub reasoning_last_at: Option<std::time::Instant>,
+    /// 流式计时（2026-10-26 消息信息卡）：首个任意分片到达 = 首包延迟口径；
+    /// 正文首/末分片 = 输出耗时与 tokens/s 口径。Instant 是进程级单调钟，
+    /// 核心循环拿 call_started 直接相减。
+    pub first_chunk_at: Option<std::time::Instant>,
+    pub content_first_at: Option<std::time::Instant>,
+    pub content_last_at: Option<std::time::Instant>,
 }
 
 impl AssistantTurn {
@@ -288,6 +294,24 @@ impl AssistantTurn {
             }
             _ => None,
         }
+    }
+    /// 首包延迟毫秒（相对请求发出时刻 call_started）；没收到任何分片返回 None
+    pub fn ttft_ms(&self, call_started: std::time::Instant) -> Option<u64> {
+        self.first_chunk_at
+            .and_then(|t| t.checked_duration_since(call_started))
+            .map(|d| d.as_millis() as u64)
+    }
+    /// 输出耗时毫秒：正文首→末分片；没有正文时回落思考跨度（弱模型常只有 reasoning）
+    pub fn gen_ms(&self) -> Option<u64> {
+        let span = match (self.content_first_at, self.content_last_at) {
+            (Some(a), Some(b)) => b.checked_duration_since(a),
+            _ => None,
+        }
+        .or_else(|| match (self.reasoning_first_at, self.reasoning_last_at) {
+            (Some(a), Some(b)) => b.checked_duration_since(a),
+            _ => None,
+        });
+        span.map(|d| d.as_millis() as u64)
     }
 }
 

@@ -97,9 +97,28 @@ pub fn effective_max_tokens(params: &ChatParams) -> Option<u64> {
 
 /// 带 compat 的组装（供网关在发送前先做历史净化时复用同一次探测）。
 /// `session_id`：本次调用归属的会话 id——OpenAI 官方的 prompt_cache_key 用它做
+/// 消息级字段白名单：只留 OpenAI 协议认的键，content/tool_calls 值整体不动。
+/// 非数组（异常形态）原样返回。
+pub(crate) fn sanitize_messages(messages: &Value) -> Value {
+    const KEEP: [&str; 5] = ["role", "content", "name", "tool_calls", "tool_call_id"];
+    let Some(arr) = messages.as_array() else { return messages.clone() };
+    Value::Array(
+        arr.iter()
+            .map(|m| match m {
+                Value::Object(map) => Value::Object(
+                    KEEP
+                        .iter()
+                        .filter_map(|k| map.get(*k).map(|v| (k.to_string(), v.clone())))
+                        .collect(),
+                ),
+                other => other.clone(),
+            })
+            .collect(),
+    )
+}
+
 /// 会话级缓存路由（同会话的前缀命中同一份缓存条目，跨会话不互相挤掉）。
-pub fn build_body_with_compat(
-    model: &str,
+pub fn build_body_with_compat(    model: &str,
     messages: &Value,
     stream: bool,
     params: &ChatParams,
@@ -117,6 +136,11 @@ pub fn build_body_with_compat(
     // 文本照发，图片降级成一句人话（截图已存工作区 screenshots/，模型可读路径，
     // 本渠道看不到图）。非 tool 消息（user/assistant）原样过。
     let messages = flatten_tool_multimodal(messages);
+    // 消息级字段白名单（2026-10-26）：会话文件里的消息带内部字段（ts 时间戳、
+    // steered/interrupted 引导标记、stats 信息卡数据），续跑轮次（last_snapshot）
+    // 会把它们原样带进这里——OpenAI 形状是整对象透传，不洗就发给端点（多数兼容
+    // 端点忽略未知字段，官方 OpenAI 直接 400）。只留协议认的字段，content 整体不动。
+    let messages = sanitize_messages(&messages);
     let mut body = json!({
         "model": model,
         "messages": messages,
@@ -293,10 +317,16 @@ impl StreamAgg {
             accumulate_tool_calls(arr, &mut self.calls);
         }
         self.turn.content.push_str(&delta.content);
+        // 流式计时：首个任意分片（含思考）= 首包；正文首/末分片 = 输出耗时（信息卡用）
+        let now = std::time::Instant::now();
+        self.turn.first_chunk_at.get_or_insert(now);
+        if !delta.content.is_empty() {
+            self.turn.content_first_at.get_or_insert(now);
+            self.turn.content_last_at = Some(now);
+        }
         if let Some(r) = &delta.reasoning {
             self.turn.reasoning.push_str(r);
             // 思考时长口径：首尾 reasoning 分片的到达时刻差（「思考 · 持续了 N 秒」）
-            let now = std::time::Instant::now();
             self.turn.reasoning_first_at.get_or_insert(now);
             self.turn.reasoning_last_at = Some(now);
         }

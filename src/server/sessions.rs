@@ -251,5 +251,42 @@ pub(super) async fn clear_session(State(state): State<AppState>, axum::extract::
     }
 }
 
-// 注：交接文档生成（/api/handoff 手动 + 核心循环 80% 自动）已按用户要求移除
-// （2026-10-01）——会话落盘与滚动摘要已保障跨任务续命，不再另生 HANDOFF.md。
+/// POST /api/sessions/truncate —— 会话截断（2026-10-26 消息操作三件套共用）。
+/// body: { id, user_index, mode }；user_index = 文件里第 N 条 user 消息（0 基，
+/// 前端按自己的用户气泡序数数——排队气泡不在文件里，两边天然对齐）：
+/// - `rollback`：删第 N 条 user 及其后全部（回到它之前；编辑重发也走它）
+/// - `delete_turn`：删第 N 条 user + 紧随的 assistant/tool 串（这一问答对），
+///   更早与更晚的历史原样保留
+/// 会话在跑时拒绝（409）：跑完的 Snapshot 会整份覆写，截了也白截——先停再截。
+pub(super) async fn truncate_session(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> (StatusCode, Json<Value>) {
+    let Some(id) = req.get("id").and_then(|v| v.as_str()) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 id" })));
+    };
+    let Some(user_index) = req.get("user_index").and_then(|v| v.as_u64()).map(|v| v as usize) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 user_index" })));
+    };
+    let mode = req.get("mode").and_then(|v| v.as_str()).unwrap_or("rollback");
+    if !matches!(mode, "rollback" | "delete_turn") {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("未知 mode: {mode}") })));
+    }
+    // 占位探测：拿得到标志=空闲（立刻还回去）；拿不到=有任务在跑
+    match state.cancel.try_begin(id) {
+        None => {
+            return (StatusCode::CONFLICT, Json(json!({ "error": "这个会话正在跑，先停止再操作" })));
+        }
+        Some(flag) => state.cancel.end(id, &flag),
+    }
+    match state.session.truncate(id, user_index, mode) {
+        Ok(n) => {
+            observability::event(
+                EventType::State,
+                json!({ "kind": "session.truncated", "session": id, "mode": mode, "user_index": user_index, "messages": n }),
+            );
+            (StatusCode::OK, Json(json!({ "ok": true, "messages": n })))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))),
+    }
+}
