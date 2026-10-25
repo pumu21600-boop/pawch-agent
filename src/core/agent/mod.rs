@@ -406,6 +406,17 @@ pub async fn run_task(
     } else {
         None
     };
+    // 回滚锚点（2026-10-27 用户定案「回滚=文件+对话一起」）：任务起点基线记到触发的
+    // 那条 user 消息上——之后「回滚到这条消息」就能把工作区恢复到它发出前的状态。
+    // cp 随 Snapshot 落进会话文件；适配器出网关前的消息白名单会剥掉它，模型看不见。
+    if let Some(cp_id) = &baseline
+        && let Some(last_user) = msgs
+            .iter_mut()
+            .rev()
+            .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+    {
+        last_user["cp"] = json!(cp_id);
+    }
     // 会话标题素材：本任务第一次最终回答（引导续跑后不从「好的已结束」生成标题）
     let mut title_source: Option<String> = None;
 

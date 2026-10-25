@@ -252,11 +252,13 @@ pub(super) async fn clear_session(State(state): State<AppState>, axum::extract::
 }
 
 /// POST /api/sessions/truncate —— 会话截断（2026-10-26 消息操作三件套共用）。
-/// body: { id, user_index, mode }；user_index = 文件里第 N 条 user 消息（0 基，
-/// 前端按自己的用户气泡序数数——排队气泡不在文件里，两边天然对齐）：
-/// - `rollback`：删第 N 条 user 及其后全部（回到它之前；编辑重发也走它）
+/// body: { id, user_index, mode, restore_checkpoint? }；user_index = 文件里第 N 条
+/// user 消息（0 基，前端按自己的用户气泡序数数——排队气泡不在文件里，两边天然对齐）：
+/// - `rollback`：删第 N 条 user 及其后全部（回到它之前；编辑重发也走它）。
+///   带 restore_checkpoint（任务起点基线 id，核心记在消息的 cp 字段上）时**先恢复
+///   工作区文件再截对话**——2026-10-27 用户定案：回滚=文件+对话一起，只删消息等于删除。
 /// - `delete_turn`：删第 N 条 user + 紧随的 assistant/tool 串（这一问答对），
-///   更早与更晚的历史原样保留
+///   更早与更晚的历史原样保留（纯对话整理，不动文件）
 /// 会话在跑时拒绝（409）：跑完的 Snapshot 会整份覆写，截了也白截——先停再截。
 pub(super) async fn truncate_session(
     State(state): State<AppState>,
@@ -272,6 +274,17 @@ pub(super) async fn truncate_session(
     if !matches!(mode, "rollback" | "delete_turn") {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("未知 mode: {mode}") })));
     }
+    let restore_cp = req
+        .get("restore_checkpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !restore_cp.is_empty()
+        && (restore_cp.len() > 64 || !restore_cp.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+    {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "检查点 id 形状不对" })));
+    }
     // 占位探测：拿得到标志=空闲（立刻还回去）；拿不到=有任务在跑
     match state.cancel.try_begin(id) {
         None => {
@@ -279,11 +292,26 @@ pub(super) async fn truncate_session(
         }
         Some(flag) => state.cancel.end(id, &flag),
     }
+    // 先恢复文件再截对话：文件恢复失败就整个不动（半回滚比不回滚更坑）
+    if !restore_cp.is_empty() {
+        let ws = crate::tools::workspace_root().to_path_buf();
+        let cp = restore_cp.clone();
+        let restored = tokio::task::spawn_blocking(move || crate::recovery::restore(&ws, &cp)).await;
+        match restored {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("文件恢复失败: {e}") })));
+            }
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("文件恢复任务失败: {e}") })));
+            }
+        }
+    }
     match state.session.truncate(id, user_index, mode) {
         Ok(n) => {
             observability::event(
                 EventType::State,
-                json!({ "kind": "session.truncated", "session": id, "mode": mode, "user_index": user_index, "messages": n }),
+                json!({ "kind": "session.truncated", "session": id, "mode": mode, "user_index": user_index, "restore_checkpoint": !restore_cp.is_empty(), "messages": n }),
             );
             (StatusCode::OK, Json(json!({ "ok": true, "messages": n })))
         }

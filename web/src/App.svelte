@@ -2962,6 +2962,18 @@
                 refreshDock(); // git 面板数据（基线/分支/脏数）更新
                 // git 面板正开着（且看的是本任务档）：新检查点到了就地重拉，跑完就能看见
                 if (rpTabs.some((t) => t.kind === 'git') && rvSource === 'task') loadReview();
+                // 回滚锚点（2026-10-27）：任务起点基线记到触发的那条用户消息上，
+                // 之后「回滚」按它恢复工作区文件
+                updMsgs(skey, (a) => {
+                  for (let i = a.length - 1; i >= 0; i--) {
+                    if (a[i].role === 'user' && !a[i].queued && !a[i].cp) {
+                      const next = [...a];
+                      next[i] = { ...next[i], cp: d.checkpoint.id };
+                      return next;
+                    }
+                  }
+                  return a;
+                });
               }
               else if (d.notice)
                 pushMsg(skey, { id: nextId(), role: 'system', content: '[通知] ' + d.notice });
@@ -3147,13 +3159,14 @@
     }
   }
 
-  // 服务端截断（409=服务端还在收尾，退避重试）
-  async function truncateRequest(key, userIndex, mode) {
+  // 服务端截断（409=服务端还在收尾，退避重试）。cp=任务起点基线 id：带上时先恢复
+  // 工作区文件再截对话（2026-10-27 用户定案：回滚=文件+对话一起）
+  async function truncateRequest(key, userIndex, mode, cp = '') {
     for (let i = 0; i < 25; i++) {
       const r = await fetch('/api/sessions/truncate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: key, user_index: userIndex, mode }),
+        body: JSON.stringify({ id: key, user_index: userIndex, mode, restore_checkpoint: cp || undefined }),
       });
       const d = await r.json().catch(() => ({}));
       if (r.ok) return d;
@@ -3188,9 +3201,12 @@
   async function rollbackMsg(m) {
     const key = curKey();
     editingMsg = null;
+    if (!(await confirmAsk(m.cp
+      ? '回滚到这条消息？\n工作区文件会恢复到它发出前的检查点状态，这条和它之后的所有消息都会删除，不可恢复。'
+      : '回滚到这条消息？\n这条消息没有文件基线记录（旧会话），只回滚对话、文件不动；这条和它之后的所有消息都会删除。'))) return;
     await ensureIdle(key);
     try {
-      await truncateRequest(key, fileUserIndex(key, m), 'rollback');
+      await truncateRequest(key, fileUserIndex(key, m), 'rollback', m.cp || '');
       await reloadSessionView(key);
     } catch (e) {
       pushMsg(key, { id: nextId(), role: 'error', content: `[回滚失败] ${e.message || e}` });
@@ -3897,7 +3913,7 @@
     for (const m of msgs) {
       if (m.role === 'user') {
         // steered=引导消息（2026-10-22）：渲染成「已引导」轻量行，不占气泡位
-        out.push({ id: nextId(), role: 'user', content: contentText(m.content), steered: !!m.steered, interrupted: !!m.interrupted, ts: m.ts });
+        out.push({ id: nextId(), role: 'user', content: contentText(m.content), steered: !!m.steered, interrupted: !!m.interrupted, ts: m.ts, cp: m.cp });
       } else if (m.role === 'assistant') {
         const asst = {
           id: nextId(),
@@ -5745,7 +5761,7 @@
                 <div class="msg-side user-side">
                   {#if m.ts}<span class="msg-ts">{fmtTs(m.ts)}</span>{/if}
                   <span class="msg-acts">
-                    <button class="msg-act" title="回滚：删掉这条和它之后的所有消息，回到它之前" on:click={() => rollbackMsg(m)}>回滚</button>
+                    <button class="msg-act" title="回滚：文件恢复到这条消息之前，并删掉这条和它之后的所有消息" on:click={() => rollbackMsg(m)}>回滚</button>
                     <button class="msg-act" title="编辑并重发（会先停止正在跑的输出）" on:click={() => beginEdit(m)}>编辑</button>
                     <button class="msg-act" title="删除这一问一答（后面的历史保留）" on:click={() => deleteMsg(m)}>删除</button>
                     <button class="msg-act" title="多选消息：批量删除或生成上下文摘录" on:click={enterSelect}>多选</button>
