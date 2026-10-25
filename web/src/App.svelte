@@ -788,52 +788,69 @@
     return savedModels.includes(m);
   }
 
-  async function toggleModel(m) {
-    const prevModels = savedModels;
-    const prevModel = model;
-    const list = savedModels.includes(m)
-      ? savedModels.filter((x) => x !== m)
-      : [...savedModels, m].sort();
-    savedModels = list; // 乐观更新
-    let newModel = model;
-    if (list.length && !list.includes(model)) {
-      newModel = list[0];
-      model = newModel;
-    }
-    // A2（施工单 012）：能力标记归用户所有，切换/勾选模型不再改写 capabilities；
-    // 后端仅在该配置无用户标记历史时按新模型名推导初值
-    if (!(await sendSettings({ models: list, model: newModel, api_key: apiKey.trim() || undefined }))) {
-      savedModels = prevModels; // F3：保存失败回滚，勾选态不许与后端脱节
-      model = prevModel;
-    }
+  // 模型勾选的保存串行队列（2026-10-26 实锤「批量选择后已选还是旧的」根因）：
+  // 弹窗里每个勾选框 on:change 立即发一个 PUT（全量 models 列表），快速连点时
+  // 多个 PUT 并发在途——先落地的旧响应经 applyState 把本地勾选态盖回旧值，
+  // 之后的点击又按回退后的列表算全量清单，落盘的就残缺（日志实证：11 连发只剩 1 个）。
+  // 串行化 = 每次都基于上一次已落定的状态计算，响应也按序落地，勾选态不再回跳。
+  let modelSaveChain = Promise.resolve();
+  function queueModelSave(fn) {
+    modelSaveChain = modelSaveChain.then(fn, fn);
+    return modelSaveChain;
   }
 
-  async function selectAllModels() {
-    const prevModels = savedModels;
-    const prevModel = model;
-    const list = [...fetchedModels].sort();
-    savedModels = list;
-    let newModel = model;
-    if (!list.includes(model) && list.length) {
-      newModel = list[0];
-      model = newModel;
-    }
-    // A2：同上，不随选择改写能力标记
-    if (!(await sendSettings({ models: list, model: newModel }))) {
-      savedModels = prevModels;
-      model = prevModel;
-    }
+  function toggleModel(m) {
+    return queueModelSave(async () => {
+      const prevModels = savedModels;
+      const prevModel = model;
+      const list = savedModels.includes(m)
+        ? savedModels.filter((x) => x !== m)
+        : [...savedModels, m].sort();
+      savedModels = list; // 乐观更新
+      let newModel = model;
+      if (list.length && !list.includes(model)) {
+        newModel = list[0];
+        model = newModel;
+      }
+      // A2（施工单 012）：能力标记归用户所有，切换/勾选模型不再改写 capabilities；
+      // 后端仅在该配置无用户标记历史时按新模型名推导初值
+      if (!(await sendSettings({ models: list, model: newModel, api_key: apiKey.trim() || undefined }))) {
+        savedModels = prevModels; // F3：保存失败回滚，勾选态不许与后端脱节
+        model = prevModel;
+      }
+    });
   }
 
-  async function selectNoModels() {
-    const prevModels = savedModels;
-    const prevModel = model;
-    savedModels = [];
-    model = '';
-    if (!(await sendSettings({ models: [], model: '' }))) {
-      savedModels = prevModels;
-      model = prevModel;
-    }
+  function selectAllModels() {
+    return queueModelSave(async () => {
+      const prevModels = savedModels;
+      const prevModel = model;
+      const list = [...fetchedModels].sort();
+      savedModels = list;
+      let newModel = model;
+      if (!list.includes(model) && list.length) {
+        newModel = list[0];
+        model = newModel;
+      }
+      // A2：同上，不随选择改写能力标记
+      if (!(await sendSettings({ models: list, model: newModel }))) {
+        savedModels = prevModels;
+        model = prevModel;
+      }
+    });
+  }
+
+  function selectNoModels() {
+    return queueModelSave(async () => {
+      const prevModels = savedModels;
+      const prevModel = model;
+      savedModels = [];
+      model = '';
+      if (!(await sendSettings({ models: [], model: '' }))) {
+        savedModels = prevModels;
+        model = prevModel;
+      }
+    });
   }
 
   // —— 模型快选 ——
@@ -5684,7 +5701,9 @@
             </div>
           </div>
         {:else if m.role === 'error'}
-          <div class="msg system"><div class="bubble error-bubble">{m.content}</div></div>
+          <!-- 报错条：紧凑一行式（用户 2026-10-26：整块大卡太难看），左对齐小字，
+               长错误照旧全文展开不许静默截断 -->
+          <div class="msg error-row"><div class="error-bubble">{m.content}</div></div>
         {:else if m.role === 'cp'}
           <!-- 检查点消息只给改动条提供基线（dockCp），不渲染 -->
         {:else}
@@ -9171,11 +9190,19 @@
     border: none;
     border-radius: 6px;
   }
+  .error-row {
+    justify-content: flex-start;
+  }
   .error-bubble {
     background: var(--tint-red-bg);
     border: 1px solid var(--tint-red-bg);
     color: var(--tint-red-fg);
     white-space: pre-wrap;
+    max-width: 100%;
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 12.5px;
+    line-height: 1.55;
   }
   .sys-text {
     font-size: 12px;

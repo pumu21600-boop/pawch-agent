@@ -881,8 +881,12 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
                         }
                         send(json!({ "api_usage": { "prompt_tokens": prompt_tokens, "cached_tokens": cached_tokens } }))
                     }
-                    // 会话落盘：核心循环每关键点推全量消息（不含 system），写盘即续命
+                    // 会话落盘：核心循环每关键点推全量消息（不含 system），写盘即续命。
+                    // brief 在落盘边界剥掉：模型上下文里留着（保缓存前缀），用户气泡
+                    // 里不能有——会话文件就是界面回显的数据源（turn.rs 有完整纪律注释）
                     AgentEvent::Snapshot { messages } => {
+                        let mut messages = messages;
+                        strip_brief_from_first_user(&mut messages);
                         *last_snapshot.lock().unwrap_or_else(|e| e.into_inner()) = messages.clone();
                         let cur_summary = summary_slot.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         match session.save(&session_id, &messages, cur_summary.as_deref()) {

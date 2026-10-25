@@ -459,8 +459,12 @@ pub(crate) async fn run_headless_inner(
                             observability::debug(&format!("无头轮用量快照落盘失败: {e}"));
                         }
                     }
-                    // 会话落盘：与 /api/chat 同一落点（无头轮也续命会话文件）
+                    // 会话落盘：与 /api/chat 同一落点（无头轮也续命会话文件）。
+                    // brief 在落盘边界剥掉（与 chat/mod.rs 同一纪律）：落盘内容=界面回显，
+                    // 用户的原话不许被系统注入污染
                     agent::AgentEvent::Snapshot { messages } => {
+                        let mut messages = messages;
+                        crate::server::chat::strip_brief_from_first_user(&mut messages);
                         *col_task.last_snapshot.lock().unwrap_or_else(|e| e.into_inner()) = messages.clone();
                         let cur = col_task.summary.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         if let Err(e) = session_mgr.save(&sid, &messages, cur.as_deref()) {

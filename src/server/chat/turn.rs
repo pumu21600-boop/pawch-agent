@@ -195,6 +195,46 @@ pub(crate) fn inject_brief_into_first_user(messages: &mut [Value], brief: &str) 
     }
 }
 
+/// 落盘前把 brief 从首条 user 消息里剥掉（`inject_brief_into_first_user` 的逆操作）。
+///
+/// brief 只该出现在**发给模型的请求**里：模型要靠它接手项目现状，但用户气泡里
+/// 显示的必须是用户的原话——brief 拼进消息后随 Snapshot 落进会话文件，用户过会
+/// 重开对话就看见自己的提问后面拖着一截系统注入（2026-10-26 用户实锤「提示词
+/// 消息自己变了」）。运行中的轮次上下文不动（保缓存前缀），只在持久化边界剥离。
+pub(crate) fn strip_brief_from_first_user(messages: &mut [Value]) {
+    const MARKER: &str = "【项目现状 · 新对话接手】";
+    let Some(first) = messages
+        .iter_mut()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+    else {
+        return;
+    };
+    match first.get_mut("content") {
+        Some(Value::String(s)) => {
+            if let Some(pos) = s.find(MARKER) {
+                *s = s[..pos].trim_end().to_string();
+            }
+        }
+        Some(Value::Array(parts)) => {
+            for part in parts.iter_mut() {
+                if part.get("type").and_then(Value::as_str) != Some("text") {
+                    continue;
+                }
+                if let Some(txt) = part.get("text").and_then(Value::as_str)
+                    && let Some(pos) = txt.find(MARKER) {
+                        part["text"] = Value::String(txt[..pos].trim_end().to_string());
+                    }
+            }
+            // 纯 brief part（数组形态注入的那块）截断后成空串：整个撤掉
+            parts.retain(|p| {
+                !(p.get("type").and_then(Value::as_str) == Some("text")
+                    && p.get("text").and_then(Value::as_str).is_some_and(str::is_empty))
+            });
+        }
+        _ => {}
+    }
+}
+
 /// 自我管理与探索纪律（2026-10-03 用户拍板，与 core/rules 的红线/闸门同一套语义）：
 /// 真机实锤过翻车——用户关着「中枢」插件让改审批档位，agent 不知道这属于自身修改、
 /// 更不知道审批档位根本没有它的通道，于是 dir/findstr 翻十六步撞上限被砍。这块就堵
@@ -420,6 +460,65 @@ mod brief_injection_tests {
         let mut msgs = json!([{"role":"user","content":null}]).as_array().cloned().unwrap();
         inject_brief_into_first_user(&mut msgs, "B");
         assert_eq!(msgs[0]["content"], json!(null));
+    }
+
+    const BRIEF: &str = "\n\n【项目现状 · 新对话接手】\n项目目录：C:\\x（x）\n- 上一条会话：「旧」（10-03）\n";
+
+    #[test]
+    fn strip_restores_original_string() {
+        // 注入再剥离 = 原文一个字不差（落盘内容对用户可见，必须可逆）
+        let mut msgs = json!([{"role":"user","content":"你是什么模型"}]).as_array().cloned().unwrap();
+        inject_brief_into_first_user(&mut msgs, BRIEF);
+        strip_brief_from_first_user(&mut msgs);
+        assert_eq!(msgs[0]["content"], json!("你是什么模型"));
+    }
+
+    #[test]
+    fn strip_drops_pure_brief_part_in_array() {
+        // 数组形态注入的纯 brief part：剥离后整块撤掉，原生 part 不动
+        let mut msgs = json!([{"role":"user","content":[
+            {"type":"text","text":"看图"},
+            {"type":"image_url","image_url":{"url":"https://example.com/cat.jpg"}}
+        ]}]).as_array().cloned().unwrap();
+        inject_brief_into_first_user(&mut msgs, BRIEF);
+        strip_brief_from_first_user(&mut msgs);
+        let parts = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], json!("看图"));
+        assert_eq!(parts[1]["type"], json!("image_url"));
+    }
+
+    #[test]
+    fn strip_trims_brief_merged_into_text_part() {
+        // 附件流水线把 brief 并进 text part 字符串的形态：截回用户原话
+        let merged = format!("你是什么模型{}", BRIEF);
+        let mut msgs = json!([{"role":"user","content":[
+            {"type":"text","text":merged},
+            {"type":"image_url","image_url":{"url":"https://example.com/cat.jpg"}}
+        ]}]).as_array().cloned().unwrap();
+        strip_brief_from_first_user(&mut msgs);
+        let parts = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], json!("你是什么模型"));
+    }
+
+    #[test]
+    fn strip_only_touches_first_user_message() {
+        let mut msgs = json!([
+            {"role":"user","content":format!("第一问{}", BRIEF)},
+            {"role":"assistant","content":"答"},
+            {"role":"user","content":format!("第二问{}", BRIEF)}
+        ]).as_array().cloned().unwrap();
+        strip_brief_from_first_user(&mut msgs);
+        assert_eq!(msgs[0]["content"], json!("第一问"));
+        assert_eq!(msgs[2]["content"], json!(format!("第二问{}", BRIEF)), "后续 user 消息不沾");
+    }
+
+    #[test]
+    fn strip_without_marker_is_noop() {
+        let mut msgs = json!([{"role":"user","content":"普通提问"}]).as_array().cloned().unwrap();
+        strip_brief_from_first_user(&mut msgs);
+        assert_eq!(msgs[0]["content"], json!("普通提问"));
     }
 }
 
