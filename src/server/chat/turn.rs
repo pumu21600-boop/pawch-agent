@@ -138,8 +138,13 @@ pub(crate) async fn turn_system_prompt(state: &AppState) -> String {
     );
     let skills_index = crate::skills::index_prompt();
     let ui_index = crate::plugin::ui::index_prompt();
+    // 渠道路由的事实边界（2026-10-26 用户拍板补全前提，非行为指令）：settings 里的
+    // 渠道/模型字段只决定请求发往哪；同一个标签后面实际挂的模型随时可能换（中转/改
+    // 配置都是日常）。此前模型把「配置的模型」当成「自己是什么」的权威答案，追问身份
+    // 就去读设置——前提补全后配置回答不了这个问题，模型自然落回自身认知。
+    let routing_fact = "\n\n【模型路由】设置里的渠道与模型字段是发请求用的路由参数：请求声明想要哪个模型名，由端点方实际应答；同一个标签后面实际挂的模型随时可能换。\n";
     let selfop = selfop_policy(state);
-    format!("{prompt}{memory_md}{workspace_hint}{skills_index}{ui_index}{selfop}")
+    format!("{prompt}{memory_md}{workspace_hint}{routing_fact}{skills_index}{ui_index}{selfop}")
 }
 
 /// 新会话第一轮的「项目现状」brief（上一条同项目会话 + 工作区未提交改动）。
