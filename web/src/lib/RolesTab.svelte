@@ -111,6 +111,37 @@
           }}
         />
       </div>
+      <div class="role-item">
+        <span class="role-name">子代理派发模型</span>
+        <Select
+          value={roles.subagent_mode ?? 'parent'}
+          title="子代理默认用哪个模型跑任务"
+          options={[
+            { value: 'parent', label: '跟随父对话' },
+            { value: 'custom', label: '自己设置（用下方专用配置）' },
+            { value: 'ask', label: '派发前询问' },
+          ]}
+          on:change={(e) => {
+            roles = { ...roles, subagent_mode: e.detail === 'parent' ? null : e.detail };
+            autoSave({ roles }, 0);
+          }}
+        />
+      </div>
+      <div class="role-item">
+        <span class="role-name">子代理专用配置</span>
+        <Select
+          value={roles.subagent ?? null}
+          title="子代理专用渠道（派发模型选「自己设置」时生效）"
+          options={[
+            { value: null, label: '未配置：由主力渠道代跑' },
+            ...configs.map((c) => ({ value: c.id, label: `${configLabel(c)} · ${c.model || '未选模型'}` })),
+          ]}
+          on:change={(e) => {
+            roles = { ...roles, subagent: e.detail };
+            autoSave({ roles }, 0);
+          }}
+        />
+      </div>
     </div>
   </div>
 {/if}

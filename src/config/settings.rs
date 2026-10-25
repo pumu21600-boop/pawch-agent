@@ -96,6 +96,11 @@ pub struct RolesSettings {
     /// > 回落主渠道；派发时的请求级 model 覆盖优先于此）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<String>,
+    /// 子代理默认派发模型（2026-10-25 用户拍板）：parent=跟随父对话（默认，用父任务
+    /// 当前轮正在跑的渠道/模型）、custom=用下方 subagent 专用配置、ask=派发前先问用户
+    /// （模型收到引导后带 model 参数重派）。派发时的显式 model 参数永远优先。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_mode: Option<String>,
     /// 降级备用配置名列表
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallbacks: Vec<String>,

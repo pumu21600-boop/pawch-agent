@@ -344,6 +344,10 @@ pub(crate) async fn run_headless_inner(
             Some(Arc::new(subagent::SubagentDispatcher {
                 state: state.clone(),
                 limits: (*state.subagent_cfg).clone(),
+                // 「跟随父对话」：无头主任务同样带本轮三元组（空=激活配置）
+                parent_model: req.model.clone(),
+                parent_base_url: req.base_url.clone(),
+                parent_api_key: req.api_key.clone(),
             }))
         } else {
             None

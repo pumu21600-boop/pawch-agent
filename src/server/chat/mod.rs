@@ -306,6 +306,10 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
         Some(Arc::new(subagent::SubagentDispatcher {
             state: state.clone(),
             limits: (*state.subagent_cfg).clone(),
+            // 「跟随父对话」模式依据：本轮的请求级三元组原样带给子代理（空=激活配置）
+            parent_model: req.model.clone(),
+            parent_base_url: req.base_url.clone(),
+            parent_api_key: req.api_key.clone(),
         }));
     // 子代理 token 并入本任务预算的水印（只计自己没计过的增量）
     let subagent_seen = std::sync::atomic::AtomicU64::new(subagent::subagent_tokens(&session_id));

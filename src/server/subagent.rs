@@ -123,6 +123,12 @@ struct Dispatch {
 pub(super) struct SubagentDispatcher {
     pub state: AppState,
     pub limits: crate::config::SubagentConfig,
+    /// 父任务当前轮正在用的渠道三元组（2026-10-25「跟随父对话」模式的依据）：
+    /// 请求级覆盖原样带过来（空 = 父任务也没覆盖、用激活配置）。构造点：chat 轮与
+    /// 无头轮各传自己的 req 三元组；子代理自己的轮不挂派发器（禁嵌套）。
+    pub parent_model: String,
+    pub parent_base_url: String,
+    pub parent_api_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,6 +303,23 @@ impl SubagentDispatcher {
         if self.limits.max_concurrent == 0 {
             return "派发失败：子代理并行未启用（config.toml [subagent] max_concurrent = 0）。".to_string();
         }
+        // 派发模型模式（2026-10-25 用户拍板）：显式 model 参数永远优先；ask 模式在
+        // 排队/建会话**之前**拦下（不占并发名额、不留派发记录），引导模型先问用户。
+        let dispatch_mode = {
+            let s = self.state.settings.read().unwrap_or_else(|e| e.into_inner());
+            s.roles
+                .as_ref()
+                .and_then(|r| r.subagent_mode.as_deref())
+                .unwrap_or("parent")
+                .to_string()
+        };
+        if dispatch_mode == "ask" && args.model.trim().is_empty() {
+            observability::event(
+                EventType::State,
+                json!({ "kind": "subagent.rejected", "parent": parent, "reason": "ask_mode" }),
+            );
+            return "派发暂停：当前「子代理派发模型」设置为「派发前询问」。请先用一句话问用户这次子代理要用哪个模型，等用户答复后把模型名写进 model 参数重新派发（用户说沿用当前对话的模型，就带 model 参数填当前对话正在用的模型名）。".to_string();
+        }
         // 派发 id 提前发号：排队/spawned/done/取消全生命周期共用（前端实时条按它聚合）
         let dispatch_id = uuid::Uuid::new_v4().simple().to_string();
         let label = if args.label.trim().is_empty() {
@@ -385,12 +408,15 @@ impl SubagentDispatcher {
             Dispatch { parent: parent.to_string(), child: child.clone(), registry: self.state.cancel.clone() },
         );
 
-        // 模型解析（草案第 5 节）：派发级 model 覆盖 > roles.subagent（B3 链）> 主渠道
+        // 模型解析（草案第 5 节 + 2026-10-25 拍板）：派发级 model 覆盖 >
+        // subagent_mode 三档（parent=父任务当前轮的三元组，空则激活配置兜底；
+        // custom=roles.subagent 席位 B3 链；ask 已在前面的闸口引导重派，走到这里
+        // 必然带显式 model）
         let (mut model, mut base_url, mut api_key) = (String::new(), String::new(), String::new());
         if !args.model.trim().is_empty() {
             // 请求级覆盖：只换模型，渠道仍走激活配置（与 /api/chat 请求级覆盖同义）
             model = args.model.trim().to_string();
-        } else {
+        } else if dispatch_mode == "custom" {
             let s = self.state.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
             // features.roles=false（「功能桥接」关）= 跳过 B3 链，子代理直接走主渠道
             let role_name = if s.features.roles {
@@ -409,6 +435,12 @@ impl SubagentDispatcher {
                 api_key = ch.api_key.clone();
             }
             // 未配置席位：三项留空 → 无头会话用激活配置（主渠道）
+        } else {
+            // parent（默认）：跟随父对话——把父任务这轮的请求级三元组原样带给无头轮，
+            // 空值语义（=激活配置）与父任务自己的回落完全一致
+            model = self.parent_model.clone();
+            base_url = self.parent_base_url.clone();
+            api_key = self.parent_api_key.clone();
         }
 
         // 历史：queued → running（补上 child/model）；UI：spawned（实时条出「执行中」行）

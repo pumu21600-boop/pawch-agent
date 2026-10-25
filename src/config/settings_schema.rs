@@ -346,7 +346,16 @@ pub const SCHEMA: &[SchemaEntry] = &[
         enum_values: &[],
         default: None,
         risk: "normal",
-        desc: "配置名或 id（未设回落主渠道）",
+        desc: "配置名或 id（未设回落主渠道）；仅当 roles.subagent_mode=custom 时生效",
+    },
+    SchemaEntry {
+        path: "roles.subagent_mode",
+        label: "子代理派发模型",
+        ty: "string",
+        enum_values: &["parent", "custom", "ask"],
+        default: Some("parent"),
+        risk: "normal",
+        desc: "parent=跟随父对话（子代理用父任务当前正在用的渠道/模型）；custom=用 roles.subagent 专用配置；ask=派发前先问用户要用哪个模型",
     },
     SchemaEntry {
         path: "roles.fallbacks",
