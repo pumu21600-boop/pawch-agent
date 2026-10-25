@@ -96,6 +96,24 @@ const SAFE_PROGRAMS: &[&str] = &[
 /// "shutil.rmtree(...)"` 三档全静默。本机没装 python 时零摩擦，装了才开始弹卡。）
 const INTERPRETER_PROGRAMS: &[&str] = &["python", "python3", "pytest", "npx"];
 
+/// 复合/包裹命令载体（2026-10-25 收口 if(del) 绕过，2026-10-04 审计遗留口子）：
+/// 这些程序名本身不进高危表，但参数里能内嵌真正要跑的命令——`if exist x del x`、
+/// `for %f in (*) do del %f`、`cmd /c del x`、`powershell -c "del x"`、`wsl rm -rf /`。
+/// 首 token 精确匹配只看程序名，危险动词藏在参数里就漏判。对这批载体扫剩余
+/// token（剥包裹引号后与高危表精确比对）。`echo "del x"` 不受影响：echo 不是载体。
+const COMPOUND_WRAPPERS: &[&str] = &[
+    "if", "for", "forfiles", "cmd", "cmd.exe", "call", "start",
+    "powershell", "powershell.exe", "pwsh", "pwsh.exe", "bash", "sh", "wsl",
+];
+
+/// 剥掉 token 两端包裹引号后与高危程序表精确比对（大小写不敏感）。
+fn dangerous_token_in(tokens: &[&str]) -> Option<&'static str> {
+    DANGEROUS_PROGRAMS
+        .iter()
+        .copied()
+        .find(|d| tokens.iter().any(|t| t.trim_matches(|c| c == '"' || c == '\'').eq_ignore_ascii_case(d)))
+}
+
 /// 需要看子命令才能判安全的程序（程序 + 第二个 token 精确匹配）。
 /// 不在表内的同程序命令（如 `cargo build`、`npm run build`）保持 Normal。
 const SAFE_SUBCOMMANDS: &[(&str, &str)] = &[
@@ -794,6 +812,17 @@ fn risk_simple_command(cmd: &str, ws: &Path) -> (RiskLevel, String) {
         return (RiskLevel::Dangerous, "检测到高危系统/删除命令".to_string());
     }
 
+    // 2.5) 复合/包裹命令：危险动词藏在参数里（if exist x del x / cmd /c del /
+    // powershell -c "del" / wsl rm）——载体程序名扫剩余 token，命中即高危
+    if COMPOUND_WRAPPERS.contains(&prog.as_str()) {
+        if let Some(d) = dangerous_token_in(&rest[1.min(rest.len())..]) {
+            return (
+                RiskLevel::Dangerous,
+                format!("复合命令内嵌高危命令 {d}: {trimmed}"),
+            );
+        }
+    }
+
     // 3) SQL 类破坏性语句（非程序名场景，保留子串兜底）
     if lower.contains("drop table") || lower.contains("drop database") {
         return (RiskLevel::Dangerous, "检测到高危数据库删除语句".to_string());
@@ -1198,6 +1227,27 @@ mod tests {
         assert_eq!(evaluate_risk("shell", &json!({"command": "echo taskkill not really"}), &ws()).0, RiskLevel::Safe);
         // 真删除仍然高危
         assert_eq!(evaluate_risk("shell", &json!({"command": "del x"}), &ws()).0, RiskLevel::Dangerous);
+    }
+
+    // —— 2026-10-25 收口：复合/包裹命令不得藏住高危动词（2026-10-04 审计遗留口子）——
+    #[test]
+    fn test_shell_compound_wrapper_not_bypassed() {
+        // cmd 批处理复合结构：if / for 里内嵌删除
+        assert_eq!(evaluate_risk("shell", &json!({"command": "if exist x del x"}), &ws()).0, RiskLevel::Dangerous);
+        assert_eq!(evaluate_risk("shell", &json!({"command": "if not exist lock rd /s /q build"}), &ws()).0, RiskLevel::Dangerous);
+        assert_eq!(evaluate_risk("shell", &json!({"command": "for %f in (*.log) do del \"%f\""}), &ws()).0, RiskLevel::Dangerous);
+        // 解释器/入口包裹
+        assert_eq!(evaluate_risk("shell", &json!({"command": "cmd /c del x"}), &ws()).0, RiskLevel::Dangerous);
+        assert_eq!(evaluate_risk("shell", &json!({"command": "powershell -c \"del x\""}), &ws()).0, RiskLevel::Dangerous);
+        assert_eq!(evaluate_risk("shell", &json!({"command": "powershell Remove-Item -Recurse x"}), &ws()).0, RiskLevel::Dangerous);
+        assert_eq!(evaluate_risk("shell", &json!({"command": "wsl rm -rf /tmp/x"}), &ws()).0, RiskLevel::Dangerous);
+        // 无害复合/包裹不受影响（if/for 不在安全程序表，默认 Normal 不弹卡即达标）
+        assert_eq!(evaluate_risk("shell", &json!({"command": "if exist x echo hi"}), &ws()).0, RiskLevel::Normal);
+        assert_eq!(evaluate_risk("shell", &json!({"command": "for /f %a in (x) do echo %a"}), &ws()).0, RiskLevel::Normal);
+        assert_eq!(evaluate_risk("shell", &json!({"command": "cmd /c cargo test"}), &ws()).0, RiskLevel::Normal);
+        assert_eq!(evaluate_risk("shell", &json!({"command": "start http://example.com"}), &ws()).0, RiskLevel::Normal);
+        // echo 引文豁免依然成立（echo 不是载体）
+        assert_eq!(evaluate_risk("shell", &json!({"command": "echo \"del x\""}), &ws()).0, RiskLevel::Safe);
     }
 
     // —— v1 修复 3：程序名精确匹配，`dirname` 不因 `dir` 前缀被误判安全 ——

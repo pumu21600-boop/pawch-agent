@@ -4914,6 +4914,9 @@
     extCurrent = e;
     extMsg = '';
     extOpen = true;
+    // 2026-10-25 E2E 补测实锤：从设置弹窗里点「打开」，面板开在弹窗背后、看起来像没反应
+    // （iframe 已加载只是被盖住）——面板分支和 popup 分支一样让设置弹窗让位
+    settingsOpen = false;
     // 与右侧产物面板互斥，避免三个面板挤在一起
     rightPanelOpen = false;
     terminalOpen = false;
@@ -5033,6 +5036,10 @@
         return;
       }
       extMsg = `已删除插件「${e.title || e.name}」（目录 ${r.dir || ''}）`;
+      // 2026-10-25 E2E 补测实锤：删完插件它的面板标签还挂着，点开是死页——一并回收。
+      // 两个面：右侧 rpTab（时间线这类进侧栏的）+ 插件面板本体（extOpen 正展示着它的话）
+      closeRpTab('ext:' + e.name);
+      if (extCurrent && extCurrent.name === e.name) extOpen = false;
       if (r.plugins) extList = r.plugins;
       else await loadExt();
     } catch (err) {
