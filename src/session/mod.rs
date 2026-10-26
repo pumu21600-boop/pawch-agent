@@ -507,6 +507,76 @@ impl SessionManager {
         Ok(n)
     }
 
+    /// 按 (role, content) 精确删除消息（2026-10-27 多选删除：勾了谁就删谁，
+    /// 不连带问答对里的另一方）。targets 按前端视图顺序给，服务端在文件里
+    /// **按序**匹配同序的未消耗目标——重复文本也能各自对上。
+    /// 连带规则仅一条：被删 assistant 的 tool 结果消息必须跟着删
+    /// （tool_call_id 失去主消息=下轮请求带悬空 tool_result，协议直接 400），
+    /// 这不是“连带彼此”，是消息结构完整性。返回删除条数；有目标没匹配上则
+    /// 整单不删（原子，不做半删）。
+    pub fn delete_messages(&self, id: &str, targets: &[(String, String)]) -> anyhow::Result<usize> {
+        let lock = self.session_lock(id);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut f) = self.get(id) else {
+            anyhow::bail!("会话不存在: {id}");
+        };
+        let mut ti = 0usize;
+        let mut doomed: Vec<usize> = Vec::new();
+        for (i, m) in f.messages.iter().enumerate() {
+            if ti >= targets.len() {
+                break;
+            }
+            let role = m.get("role").and_then(serde_json::Value::as_str).unwrap_or("");
+            let content = match m.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Null) | None => String::new(),
+                Some(v) => serde_json::to_string(v).unwrap_or_default(),
+            };
+            if role == targets[ti].0 && content == targets[ti].1 {
+                doomed.push(i);
+                ti += 1;
+            }
+        }
+        if ti < targets.len() {
+            anyhow::bail!("有 {} 条消息没匹配上（含附件/多模态的消息暂不支持精确删除）", targets.len() - ti);
+        }
+        // 被删 assistant 的 tool_calls id → 其 tool 结果消息一并删（消息结构完整性）
+        let mut call_ids: Vec<String> = Vec::new();
+        for &i in &doomed {
+            if f.messages[i].get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+                continue;
+            }
+            if let Some(calls) = f.messages[i].get("tool_calls").and_then(serde_json::Value::as_array) {
+                for c in calls {
+                    if let Some(cid) = c.get("id").and_then(serde_json::Value::as_str) {
+                        call_ids.push(cid.to_string());
+                    }
+                }
+            }
+        }
+        if !call_ids.is_empty() {
+            for (i, m) in f.messages.iter().enumerate() {
+                if doomed.contains(&i) {
+                    continue;
+                }
+                if m.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                    && m.get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|cid| call_ids.iter().any(|x| x == cid))
+                {
+                    doomed.push(i);
+                }
+            }
+        }
+        doomed.sort_unstable();
+        let n = doomed.len();
+        for &i in doomed.iter().rev() {
+            f.messages.remove(i);
+        }
+        self.write(&f)?;
+        Ok(n)
+    }
+
     /// 同项目（workspace 相同）里最近更新的一条已落盘会话，排除 current_id。
     /// 新会话开场「上次做到哪」的来源；没有则返回 None。
     pub fn previous_in_workspace(&self, workspace: &str, current_id: &str) -> Option<SessionFile> {

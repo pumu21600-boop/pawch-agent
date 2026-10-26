@@ -3258,35 +3258,30 @@
     msgSelected = msgSelected.includes(id) ? msgSelected.filter((x) => x !== id) : [...msgSelected, id];
   }
 
-  // 选中消息所属问答对的 user 序数（assistant 行挂到它前面最近的那条 user）
-  function selectedTurnUserIndexes() {
-    const key = curKey();
-    const arr = sessionMsgs[key] || [];
-    const idxs = new Set();
-    for (const id of msgSelected) {
-      const at = arr.findIndex((x) => x.id === id);
-      if (at < 0) continue;
-      let anchor = null;
-      for (let k = at; k >= 0; k--) {
-        if (arr[k].role === 'user' && !arr[k].queued) {
-          anchor = arr[k];
-          break;
-        }
-      }
-      if (anchor) idxs.add(fileUserIndex(key, anchor));
-    }
-    return [...idxs].sort((a, b) => b - a); // 从后往前删，前面的序数不漂移
+  // 勾选消息 → (role, content) 目标表（多选精确删除：勾谁删谁，不连带问答对另一方）
+  function selectedDeleteTargets() {
+    const arr = sessionMsgs[curKey()] || [];
+    return msgSelected
+      .map((id) => arr.find((m) => m.id === id))
+      .filter((m) => m && m.role === 'user' ? !m.queued : m && m.role === 'assistant')
+      .map((m) => ({ role: m.role, content: m.content || '' }));
   }
 
   async function deleteSelected() {
     const key = curKey();
-    const idxs = selectedTurnUserIndexes();
-    if (!idxs.length) return;
-    // 删除类纪律：不可恢复的批量删除先弹确认（文件不动要说清，和回滚区分开）
-    if (!(await confirmAsk(`删除所选的 ${msgSelected.length} 条消息（涉及 ${idxs.length} 个问答对）？\n删除后不可恢复；工作区文件不受影响。`))) return;
+    const targets = selectedDeleteTargets();
+    if (!targets.length) return;
+    // 删除类纪律：不可恢复的删除先弹确认（只删勾选的，文件不动）
+    if (!(await confirmAsk(`删除所选的 ${targets.length} 条消息？\n只删勾选的这些，问答对里的另一半不连带；删除后不可恢复，工作区文件不受影响。`))) return;
     await ensureIdle(key);
     try {
-      for (const i of idxs) await truncateRequest(key, i, 'delete_turn');
+      const r = await fetch('/api/sessions/truncate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: key, mode: 'delete_selected', targets }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       exitSelect();
       await reloadSessionView(key);
     } catch (e) {
@@ -5974,7 +5969,7 @@
         <div class="select-bar">
           <span>已选 {msgSelected.length} 条</span>
           <button class="btn" disabled={!msgSelected.length} on:click={deleteSelected}>删除所选</button>
-          <button class="btn" disabled={!msgSelected.length} on:click={copySelectedAsContext}>复制为上下文</button>
+          <button class="btn" disabled={!msgSelected.length} on:click={copySelectedAsContext} title="把选中的消息拼成上下文摘录复制到剪贴板，去别的对话粘贴即可">复制</button>
           {#if ctxCopied}<span class="select-copied">已复制，去别的对话粘贴即可</span>{/if}
           <span class="select-flex"></span>
           <button class="btn ghost" on:click={exitSelect}>退出多选</button>

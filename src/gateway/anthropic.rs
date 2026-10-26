@@ -201,6 +201,17 @@ pub fn build_body(
 ) -> Value {
     let arr = messages.as_array().cloned().unwrap_or_default();
 
+    // 句首孤儿剥除（2026-10-27 多选精确删除的配套）：删了 user 消息留下 assistant 时，
+    // 消息列会以 assistant/tool 开头——Anthropic Messages 要求首条必须是 user，直接 400。
+    // 跳过首个 user（或 system，system 走顶层不提在这里）之前的 assistant/tool。
+    let mut arr = arr;
+    let anchor = arr
+        .iter()
+        .position(|m| matches!(m.get("role").and_then(Value::as_str), Some("user") | Some("system") | Some("developer")));
+    if let Some(a) = anchor {
+        arr.drain(..a);
+    }
+
     // system / developer 消息提为顶层 system 参数（按序拼接）
     let mut system_parts: Vec<String> = Vec::new();
     let mut out: Vec<Value> = Vec::new();

@@ -97,10 +97,26 @@ pub fn effective_max_tokens(params: &ChatParams) -> Option<u64> {
 
 /// 带 compat 的组装（供网关在发送前先做历史净化时复用同一次探测）。
 /// `session_id`：本次调用归属的会话 id——OpenAI 官方的 prompt_cache_key 用它做
+/// 剥掉首个 user 消息之前的 assistant/tool 悬空消息（多选精确删除 user 后的配套，
+/// Anthropic 协议首条必须 user；OpenAI 侧统一处理更稳）。system 消息在句首合法，
+/// 与 user 一起当锚点。非数组/无锚点原样返回。
+pub(crate) fn drop_leading_non_user(messages: &Value) -> Value {
+    let Some(arr) = messages.as_array() else { return messages.clone() };
+    let Some(fu) = arr
+        .iter()
+        .position(|m| matches!(m.get("role").and_then(Value::as_str), Some("user") | Some("system")))
+    else {
+        return messages.clone(); // 没有 user/system：不动（异常历史，别越改越坏）
+    };
+    if fu == 0 {
+        return messages.clone();
+    }
+    Value::Array(arr[fu..].to_vec())
+}
+
 /// 消息级字段白名单：只留 OpenAI 协议认的键，content/tool_calls 值整体不动。
 /// 非数组（异常形态）原样返回。
-pub(crate) fn sanitize_messages(messages: &Value) -> Value {
-    const KEEP: [&str; 5] = ["role", "content", "name", "tool_calls", "tool_call_id"];
+pub(crate) fn sanitize_messages(messages: &Value) -> Value {    const KEEP: [&str; 5] = ["role", "content", "name", "tool_calls", "tool_call_id"];
     let Some(arr) = messages.as_array() else { return messages.clone() };
     Value::Array(
         arr.iter()
@@ -141,6 +157,9 @@ pub fn build_body_with_compat(    model: &str,
     // 会把它们原样带进这里——OpenAI 形状是整对象透传，不洗就发给端点（多数兼容
     // 端点忽略未知字段，官方 OpenAI 直接 400）。只留协议认的字段，content 整体不动。
     let messages = sanitize_messages(&messages);
+    // 句首孤儿剥除（2026-10-27 多选精确删除配套）：user 消息被精确删掉后，消息列可能
+    // 以 assistant/tool 开头（悬空回复）。OpenAI 侧多数端点容忍，但统一剥掉更稳。
+    let messages = drop_leading_non_user(&messages);
     let mut body = json!({
         "model": model,
         "messages": messages,
@@ -337,6 +356,7 @@ impl StreamAgg {
 
     /// 流结束：hold 里若剩半截标签（如截断在 "<thi"），按当前通道归位；tool_calls 落位。
     pub(crate) fn finish(&mut self) {
+        self.turn.finished_at = Some(std::time::Instant::now());
         let (tail_think, tail_content) = self.think_split.finish();
         if !tail_think.is_empty() {
             self.turn.reasoning.push_str(&tail_think);
@@ -463,5 +483,56 @@ mod tests {
         accumulate_tool_calls(&[json!({"id": "x", "function": {"name": "git"}})], &mut c2);
         assert_eq!(c2.len(), 1);
         assert_eq!(c2[0].id, "x");
+    }
+
+    #[test]
+    fn drop_leading_non_user_trims_orphan_head() {
+        // 多选精确删除 user 后：句首悬空 assistant/tool 剥掉，user 及其后原样
+        let mut msgs = json!([
+            {"role":"assistant","content":"悬空回复"},
+            {"role":"tool","tool_call_id":"t1","content":"悬空结果"},
+            {"role":"user","content":"第二问"},
+            {"role":"assistant","content":"第二答"}
+        ])
+        .as_array()
+        .cloned()
+        .unwrap();
+        msgs = drop_leading_non_user(&json!(msgs)).as_array().cloned().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["content"], json!("第二问"));
+        assert_eq!(msgs[1]["content"], json!("第二答"));
+    }
+
+    #[test]
+    fn drop_leading_non_user_keeps_system_head() {
+        // system 在句首合法：与 user 一起当锚点，不剥
+        let msgs = json!([
+            {"role":"system","content":"系统"},
+            {"role":"user","content":"问"}
+        ]);
+        let out = drop_leading_non_user(&msgs);
+        assert_eq!(out, msgs, "system+user 开头一个不该动");
+    }
+
+    #[test]
+    fn drop_leading_non_user_no_user_is_noop() {
+        // 没有 user 的异常历史：原样返回，不越改越坏
+        let msgs = json!([{"role":"assistant","content":"只有助手"}]);
+        assert_eq!(drop_leading_non_user(&msgs), msgs);
+    }
+
+    #[test]
+    fn sanitize_messages_strips_internal_fields() {
+        // 内部字段（ts/steered/stats/cp）不出网关；协议字段与 content 值整体不动
+        let msgs = json!([
+            {"role":"user","content":"问","ts":123,"steered":true,"cp":"abc","stats":{"x":1}},
+            {"role":"assistant","content":null,"tool_calls":[{"id":"c1"}],"work_ms":9,"stats":{"ttft_ms":1}},
+            {"role":"tool","tool_call_id":"c1","content":"结果","display_only":true}
+        ]);
+        let out = sanitize_messages(&msgs);
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr[0], json!({"role":"user","content":"问"}), "用户消息只剩协议字段");
+        assert_eq!(arr[1], json!({"role":"assistant","content":null,"tool_calls":[{"id":"c1"}]}));
+        assert_eq!(arr[2], json!({"role":"tool","tool_call_id":"c1","content":"结果"}));
     }
 }

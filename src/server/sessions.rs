@@ -259,6 +259,8 @@ pub(super) async fn clear_session(State(state): State<AppState>, axum::extract::
 ///   工作区文件再截对话**——2026-10-27 用户定案：回滚=文件+对话一起，只删消息等于删除。
 /// - `delete_turn`：删第 N 条 user + 紧随的 assistant/tool 串（这一问答对），
 ///   更早与更晚的历史原样保留（纯对话整理，不动文件）
+/// - `delete_selected`：按 body.targets=[{role,content}] 精确删除勾选的消息——
+///   多选用（2026-10-27 用户定案「勾了谁就删谁，不要连带彼此」）；user_index 忽略
 /// 会话在跑时拒绝（409）：跑完的 Snapshot 会整份覆写，截了也白截——先停再截。
 pub(super) async fn truncate_session(
     State(state): State<AppState>,
@@ -267,13 +269,40 @@ pub(super) async fn truncate_session(
     let Some(id) = req.get("id").and_then(|v| v.as_str()) else {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 id" })));
     };
-    let Some(user_index) = req.get("user_index").and_then(|v| v.as_u64()).map(|v| v as usize) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 user_index" })));
+    let mode0 = req.get("mode").and_then(|v| v.as_str()).unwrap_or("rollback");
+    let user_index: usize = match req.get("user_index").and_then(|v| v.as_u64()) {
+        Some(v) => v as usize,
+        // delete_selected 按 targets 删，不需要 user 序数
+        None if mode0 == "delete_selected" => 0,
+        None => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 user_index" })));
+        }
     };
     let mode = req.get("mode").and_then(|v| v.as_str()).unwrap_or("rollback");
-    if !matches!(mode, "rollback" | "delete_turn") {
+    if !matches!(mode, "rollback" | "delete_turn" | "delete_selected") {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("未知 mode: {mode}") })));
     }
+    // delete_selected：按 (role, content) 精确删除勾选的消息（不连带问答对另一方，
+    // 仅被删 assistant 的 tool 结果消息结构性跟随——否则下轮请求带悬空 tool_result 必 400）
+    let targets: Vec<(String, String)> = if mode == "delete_selected" {
+        match req.get("targets").and_then(|v| v.as_array()) {
+            Some(arr) if !arr.is_empty() => arr
+                .iter()
+                .map(|t| {
+                    Ok((
+                        t.get("role").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        t.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, ()>>()
+                .unwrap_or_default(),
+            _ => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": "delete_selected 需要 targets" })));
+            }
+        }
+    } else {
+        Vec::new()
+    };
     let restore_cp = req
         .get("restore_checkpoint")
         .and_then(|v| v.as_str())
@@ -306,6 +335,18 @@ pub(super) async fn truncate_session(
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("文件恢复任务失败: {e}") })));
             }
         }
+    }
+    if mode == "delete_selected" {
+        return match state.session.delete_messages(id, &targets) {
+            Ok(n) => {
+                observability::event(
+                    EventType::State,
+                    json!({ "kind": "session.messages_deleted", "session": id, "deleted": n }),
+                );
+                (StatusCode::OK, Json(json!({ "ok": true, "deleted": n })))
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))),
+        };
     }
     match state.session.truncate(id, user_index, mode) {
         Ok(n) => {
