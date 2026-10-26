@@ -259,8 +259,11 @@ pub(super) async fn clear_session(State(state): State<AppState>, axum::extract::
 ///   工作区文件再截对话**——2026-10-27 用户定案：回滚=文件+对话一起，只删消息等于删除。
 /// - `delete_turn`：删第 N 条 user + 紧随的 assistant/tool 串（这一问答对），
 ///   更早与更晚的历史原样保留（纯对话整理，不动文件）
+/// - `delete_user`：只删第 N 条 user（2026-10-27 用户定案：单条删除不连带回答；
+///   留在句首的孤儿 assistant 由适配器剥除）
 /// - `delete_selected`：按 body.targets=[{role,content}] 精确删除勾选的消息——
 ///   多选用（2026-10-27 用户定案「勾了谁就删谁，不要连带彼此」）；user_index 忽略
+///
 /// 会话在跑时拒绝（409）：跑完的 Snapshot 会整份覆写，截了也白截——先停再截。
 pub(super) async fn truncate_session(
     State(state): State<AppState>,
@@ -279,7 +282,7 @@ pub(super) async fn truncate_session(
         }
     };
     let mode = req.get("mode").and_then(|v| v.as_str()).unwrap_or("rollback");
-    if !matches!(mode, "rollback" | "delete_turn" | "delete_selected") {
+    if !matches!(mode, "rollback" | "delete_turn" | "delete_user" | "delete_selected") {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("未知 mode: {mode}") })));
     }
     // delete_selected：按 (role, content) 精确删除勾选的消息（不连带问答对另一方，

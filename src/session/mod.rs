@@ -464,10 +464,13 @@ impl SessionManager {
         self.write(&f)
     }
 
-    /// 会话截断（2026-10-26 消息操作：回滚/编辑重发/删除问答对共用）。
+    /// 会话截断（2026-10-26 消息操作：回滚/编辑重发/删除共用）。
     /// `user_index` = 文件里第 N 条 user 消息（0 基）；mode：
     /// - "rollback"：删第 N 条 user 及其后全部（回到它之前）
     /// - "delete_turn"：删第 N 条 user + 紧随的 assistant/tool 串（这一问答对）
+    /// - "delete_user"：只删第 N 条 user（2026-10-27 用户定案：单条删除不连带
+    ///   回答；留下来的 assistant 由适配器按句首孤儿规则剥掉）
+    ///
     /// 返回截断后的消息总数；找不到第 N 条 user 或会话不存在时报错。
     /// 锁内读-改-写：与 Snapshot 落盘/Snapshot 事件互斥（server 层已先挡掉在跑的会话）。
     pub fn truncate(&self, id: &str, user_index: usize, mode: &str) -> anyhow::Result<usize> {
@@ -492,6 +495,9 @@ impl SessionManager {
         };
         let end = if mode == "rollback" {
             f.messages.len()
+        } else if mode == "delete_user" {
+            // 单条删除：只拿掉这条 user，后面的 assistant/tool 原样保留
+            start + 1
         } else {
             let mut e = start + 1;
             while e < f.messages.len()
@@ -683,6 +689,50 @@ mod tests {
         let d = tempdir::TempDir::new(tag);
         let m = SessionManager::new(d.path());
         (d, m)
+    }
+
+    #[test]
+    fn delete_user_keeps_answer_for_precise_single_delete() {
+        // 2026-10-27 用户实锤：点一条消息删除，结果一问一答都没了。
+        // delete_user 只拿掉点中的那条 user，回答留在原地（句首孤儿由适配器剥）。
+        let _ = crate::observability::init(
+            &std::env::temp_dir().join("agent-test-logs"),
+            "sessions.jsonl",
+            format!("session-test-{}", uuid::Uuid::new_v4()),
+        );
+        let (_d, m) = mgr("delete-user");
+        let a = m.new_id();
+        m.save(
+            &a,
+            &[
+                json!({"role":"user","content":"第一问"}),
+                json!({"role":"assistant","content":"第一答"}),
+                json!({"role":"user","content":"第二问"}),
+                json!({"role":"assistant","content":"第二答"}),
+            ],
+            None,
+        )
+        .unwrap();
+
+        // 删第一问：只少这一条，第一答还在
+        assert_eq!(m.truncate(&a, 0, "delete_user").unwrap(), 3);
+        let f = m.get(&a).unwrap();
+        let texts: Vec<&str> = f
+            .messages
+            .iter()
+            .map(|x| x.get("content").and_then(Value::as_str).unwrap_or(""))
+            .collect();
+        assert_eq!(texts, vec!["第一答", "第二问", "第二答"]);
+
+        // 删第二问：第二答同样保留（删完第一问后，第二问是仅剩的 user，序数变 0）
+        assert_eq!(m.truncate(&a, 0, "delete_user").unwrap(), 2);
+        let f = m.get(&a).unwrap();
+        let texts: Vec<&str> = f
+            .messages
+            .iter()
+            .map(|x| x.get("content").and_then(Value::as_str).unwrap_or(""))
+            .collect();
+        assert_eq!(texts, vec!["第一答", "第二答"]);
     }
 
     #[test]

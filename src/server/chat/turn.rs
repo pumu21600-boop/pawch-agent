@@ -145,8 +145,10 @@ pub(crate) async fn turn_system_prompt(state: &AppState) -> String {
     let routing_fact = "\n\n【模型路由】设置里的渠道与模型字段是发请求用的路由参数：请求声明想要哪个模型名，由端点方实际应答；同一个标签后面实际挂的模型随时可能换。\n";
     // 当前渠道/模型常驻提示（2026-10-27 用户定案）：身份问答必须一句话直答，不许为
     // 答个身份去调 settings 工具（用户实锤「问它是什么模型它直接去读模型配置」）。
-    // 与【工作区】同款思路：信息直接给足，模型照读即可；放这里跨轮字节稳定
-    // （system 缓存前缀纪律，见本函数上方注释）。
+    // 与【工作区】同款思路：信息直接给足；放这里跨轮字节稳定（system 缓存前缀纪律，
+    // 见本函数上方注释）。
+    // 同日第二次纠正「这是假性自我认知」：这段只提供**路由事实**，不再让模型
+    // 宣称「我是 <model>」——身份是 Pawch Agent，模型名只是这轮请求发往哪。
     let model_hint = {
         let s = state.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
         let cfg = s.active_or_default();
@@ -155,9 +157,10 @@ pub(crate) async fn turn_system_prompt(state: &AppState) -> String {
             .map(|p| p.name.clone())
             .unwrap_or_else(|| cfg.provider_id.clone());
         format!(
-            "\n\n【当前模型】当前渠道配置「{cfg}」，模型 {model}（{vendor}）。\
-             用户问「你是什么模型」「你的身份」这类问题：一句话答「我是 {model}，{vendor}的模型」——\
-             不要去读设置、不要调工具、不主动展开，用户追问了再说。\n",
+            "\n\n【当前模型】这轮对话的模型路由：渠道配置「{cfg}」，模型 {model}（{vendor}）。\
+             这是请求发往哪的路由标签，不是你自身的身份，也不代表底层模型一定就是它。\
+             用户问「你是什么模型」「你的身份」时按「你是谁」节答：说自己是 Pawch Agent，\
+             再报这条路由；不要读设置、不要调工具、不主动展开，用户追问了再说。\n",
             cfg = cfg.name,
             model = model,
             vendor = vendor,

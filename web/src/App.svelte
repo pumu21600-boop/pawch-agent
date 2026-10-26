@@ -34,6 +34,7 @@
   let apiKey = '';
   let configName = '';
   let savedModels = [];
+  let savedBaseUrl = ''; // 已保存的 base_url：只有「获取模型」打的就是这套端点时才据此收敛已选表
   let savedKeyUrl = '';   // 当前激活配置的已存 key 尾号
   let settingsMsg = '';
   let settingsOpen = false;
@@ -644,6 +645,7 @@
   }
 
   function applyState(s) {
+    savedBaseUrl = s.base_url || '';
     if (!editingField('baseUrl')) baseUrl = s.base_url || '';
     model = s.model || '';
     if (!editingField('configName')) configName = s.name || '';
@@ -785,8 +787,29 @@
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      fetchedModels = d.models || [];
+      const models = d.models || [];
+      fetchedModels = models;
       modelModalOpen = true;
+      // 已选模型必须严格跟着端点这次返回的清单走（2026-10-27 用户实锤：端点下架的
+      // agnes-2.0-flash 在选完别的模型后还赖在已选列表里）。只在「获取的就是已保存
+      // 的那套端点」时收敛——拿别的 base_url 试拉模型不能清掉当前配置的清单；
+      // 端点返回空表也不动，避免一次异常响应把配置清空。
+      const norm = (u) => (u || '').trim().replace(/\/+$/, '');
+      if (models.length && norm(baseUrl) === norm(savedBaseUrl)) {
+        await queueModelSave(async () => {
+          const keep = savedModels.filter((m) => models.includes(m));
+          if (keep.length === savedModels.length) return;
+          const prevModels = savedModels;
+          const prevModel = model;
+          const newModel = keep.includes(model) ? model : keep[0] || '';
+          savedModels = keep;
+          model = newModel;
+          if (!(await sendSettings({ models: keep, model: newModel }))) {
+            savedModels = prevModels;
+            model = prevModel;
+          }
+        });
+      }
       settingsMsg = '';
     } catch (e) {
       settingsMsg = `获取模型失败: ${e.message}`;
@@ -812,9 +835,14 @@
     return queueModelSave(async () => {
       const prevModels = savedModels;
       const prevModel = model;
-      const list = savedModels.includes(m)
-        ? savedModels.filter((x) => x !== m)
-        : [...savedModels, m].sort();
+      // 弹窗里能看见的只有本次拉回的清单：勾选以它为准，端点已下架的旧模型
+      // 不参与（2026-10-27 用户定案：已选列表严格跟最后一次选择）
+      const base = fetchedModels.length
+        ? savedModels.filter((x) => fetchedModels.includes(x))
+        : savedModels;
+      const list = base.includes(m)
+        ? base.filter((x) => x !== m)
+        : [...base, m].sort();
       savedModels = list; // 乐观更新
       let newModel = model;
       if (list.length && !list.includes(model)) {
@@ -2786,7 +2814,7 @@
     const history = (sessionMsgs[key] || [])
       .filter((m) => (m.role === 'user' && m.content && !m.queued) || (m.role === 'assistant' && m.content && !m.streaming))
       .map((m) => ({ role: m.role, content: m.content }));
-    history.push({ role: 'user', content: effectiveMsg });
+    history.push({ role: 'user', content: effectiveMsg, ts: Date.now() });
     const asstId = nextId();
     // 出队 / 立即发送的那条：原地把「排队中」气泡转正（保持顺序），不新增用户气泡。
     // 引导（steer + silentSteer，2026-10-22 用户定案）反过来：**撤掉**排队气泡——
@@ -3215,9 +3243,12 @@
 
   async function deleteMsg(m) {
     const key = curKey();
+    // 删除类纪律：不可恢复的删除先弹确认（2026-10-27 用户点名「弹窗在哪」）。
+    // 只删点中的这条；同一问答的另一半保留（用户明确不许一问一答一起删）。
+    if (!(await confirmAsk('删除这条消息？\n只删这一条，同一问答里的回答会保留；删除后不可恢复，工作区文件不受影响。'))) return;
     await ensureIdle(key);
     try {
-      await truncateRequest(key, fileUserIndex(key, m), 'delete_turn');
+      await truncateRequest(key, fileUserIndex(key, m), 'delete_user');
       await reloadSessionView(key);
     } catch (e) {
       pushMsg(key, { id: nextId(), role: 'error', content: `[删除失败] ${e.message || e}` });
@@ -3256,6 +3287,13 @@
   }
   function toggleSelect(id) {
     msgSelected = msgSelected.includes(id) ? msgSelected.filter((x) => x !== id) : [...msgSelected, id];
+  }
+  // 多选模式：点消息整行即勾选（2026-10-27 用户点名「点击消息那一行也会选中」）。
+  // 排队气泡还没进文件、流式回答也还不能删，不参与多选。
+  function selectRow(m) {
+    if (!msgSelectMode) return;
+    if (m.queued || (m.role === 'assistant' && m.streaming)) return;
+    toggleSelect(m.id);
   }
 
   // 勾选消息 → (role, content) 目标表（多选精确删除：勾谁删谁，不连带问答对另一方）
@@ -3373,7 +3411,11 @@
         const mine = sessions.filter(
           (s) => !s.archived && s.workspace && normPath(s.workspace).toLowerCase() === normPath(workspace).toLowerCase(),
         );
-        if (mine.length) await loadSession(mine[0].id);
+        // 重启后默认打开最近一条**有内容**的会话：侧栏最上面可能是一条空的新对话
+        // （用户刚点过「新对话」），直接打开它看起来就像「历史/思考/工具调用被清掉了」。
+        // 全空时才退回首条（保持原有的空项目行为）。
+        const pick = mine.find((s) => (s.count || 0) > 0) || mine[0];
+        if (pick) await loadSession(pick.id);
       }
     } catch (e) {
       sessions = [];
@@ -5737,12 +5779,13 @@
               <span class="steer-line-text">{m.content}</span>
             </div>
           {:else}
-          <div class="msg user">
+          <div class="msg user" class:selecting={msgSelectMode} on:click={() => selectRow(m)}>
             {#if msgSelectMode && !m.queued}
-              <label class="msg-check" title="选中这条消息">
-                <input type="checkbox" checked={msgSelected.includes(m.id)} on:change={() => toggleSelect(m.id)} />
-              </label>
+              <span class="msg-check" title="选中这条消息">
+                <input type="checkbox" checked={msgSelected.includes(m.id)} tabindex="-1" />
+              </span>
             {/if}
+            <div class="msg-stack">
             {#if editingMsg && editingMsg.id === m.id}
               <!-- 编辑态：原位变输入框；保存=回滚到这条之前+以新文本重发（先停输出） -->
               <div class="bubble user-bubble edit-box">
@@ -5754,17 +5797,6 @@
                 </div>
               </div>
             {:else}
-              {#if !msgSelectMode && !m.queued}
-                <div class="msg-side user-side">
-                  {#if m.ts}<span class="msg-ts">{fmtTs(m.ts)}</span>{/if}
-                  <span class="msg-acts">
-                    <button class="msg-act" title="回滚：文件恢复到这条消息之前，并删掉这条和它之后的所有消息" on:click={() => rollbackMsg(m)}>回滚</button>
-                    <button class="msg-act" title="编辑并重发（会先停止正在跑的输出）" on:click={() => beginEdit(m)}>编辑</button>
-                    <button class="msg-act" title="删除这一问一答（后面的历史保留）" on:click={() => deleteMsg(m)}>删除</button>
-                    <button class="msg-act" title="多选消息：批量删除或生成上下文摘录" on:click={enterSelect}>多选</button>
-                  </span>
-                </div>
-              {/if}
               <div class="bubble user-bubble">
               {#if m.attachments && m.attachments.length > 0}
                 <div class="msg-attachments">
@@ -5812,16 +5844,38 @@
                 <div class="queued-row"><span class="queued-badge steered">已中断当前操作并立即发送</span></div>
               {/if}
             </div>
+            {#if !msgSelectMode && !m.queued}
+              <!-- 操作条在消息下方：时间贴行边、功能贴另一边；图标+tooltip，不占正文 -->
+              <div class="msg-meta">
+                {#if m.ts}<span class="msg-ts">{fmtTs(m.ts)}</span>{/if}
+                <span class="msg-acts" on:click|stopPropagation>
+                  <button class="msg-act" title="回滚：文件恢复到这条消息之前，并删掉这条和它之后的所有消息" aria-label="回滚" on:click|stopPropagation={() => rollbackMsg(m)}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+                  </button>
+                  <button class="msg-act" title="编辑并重发（会先停止正在跑的输出）" aria-label="编辑" on:click|stopPropagation={() => beginEdit(m)}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+                  </button>
+                  <button class="msg-act" title="删除这条消息（同一问答的另一半保留；不可恢复）" aria-label="删除" on:click|stopPropagation={() => deleteMsg(m)}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                  </button>
+                  <button class="msg-act" title="多选消息：批量删除或生成上下文摘录" aria-label="多选" on:click|stopPropagation={enterSelect}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 6.5h7"/><path d="M14 17.5h7"/></svg>
+                  </button>
+                </span>
+              </div>
             {/if}
+            {/if}
+            </div>
           </div>
           {/if}
         {:else if m.role === 'assistant'}
-          <div class="msg assistant">
+          <div class="msg assistant" class:selecting={msgSelectMode} on:click={() => selectRow(m)}>
             {#if msgSelectMode && !m.streaming}
-              <label class="msg-check" title="选中这条回复">
-                <input type="checkbox" checked={msgSelected.includes(m.id)} on:change={() => toggleSelect(m.id)} />
-              </label>
+              <span class="msg-check" title="选中这条回复">
+                <input type="checkbox" checked={msgSelected.includes(m.id)} tabindex="-1" />
+              </span>
             {/if}
+            <div class="msg-stack">
             <div class="bubble asst-bubble">
               {#if m.workStartedAt || m.workMs}
                 <div class="work-line">
@@ -5934,14 +5988,20 @@
               {/if}
               {#if m.streaming && m.content}<span class="cursor"></span>{/if}
             </div>
-            <div class="msg-side asst-side">
+            {#if m.ts || (m.stats && !m.streaming)}
+            <div class="msg-meta">
               {#if m.ts}<span class="msg-ts">{fmtTs(m.ts)}</span>{/if}
               {#if m.stats && !m.streaming}
-                <!-- 信息卡入口：首 token 延迟/输出耗时/渠道/模型/tokens/缓存命中 -->
-                <button class="msg-act" title="这条回复的详细信息" on:click={() => (statsModal = m)}>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>
-                </button>
+                <!-- 信息卡入口：首 token 延迟/输出耗时/渠道/模型/tokens/缓存命中。
+                     放回答下方右下角（用户 2026-10-27 点名布局） -->
+                <span class="msg-acts" on:click|stopPropagation>
+                  <button class="msg-act" title="这条回复的详细信息" aria-label="回答详情" on:click|stopPropagation={() => (statsModal = m)}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>
+                  </button>
+                </span>
               {/if}
+            </div>
+            {/if}
             </div>
           </div>
         {:else if m.role === 'error'}
@@ -9472,21 +9532,27 @@
   .error-row {
     justify-content: flex-start;
   }
-  /* —— 消息操作/边缘时间/多选/信息卡（2026-10-26 用户需求批）—— */
-  .msg-side {
+  /* —— 消息操作/边缘时间/多选/信息卡（2026-10-26 用户需求批）——
+     2026-10-27 布局重排：操作条从消息左侧/右侧挪到消息下方一行；时间贴行边，
+     功能图标贴另一边。用户消息右对齐时时间仍在整行最左（视觉上是一条时间轴），
+     模型回答的「回答详情」则落右下角。 */
+  .msg-stack {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .msg.user .msg-stack {
+    align-items: flex-end;
+  }
+  .msg-meta {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 8px;
-    flex-shrink: 0;
-    align-self: center;
-    max-width: 10%;
-  }
-  .user-side {
-    margin-right: 8px;
-    justify-content: flex-end;
-  }
-  .asst-side {
-    margin-left: 8px;
+    width: 100%;
+    min-height: 18px;
+    margin-top: 2px;
   }
   .msg-ts {
     font-size: 11px;
@@ -9496,19 +9562,25 @@
   }
   .msg-acts {
     display: flex;
-    gap: 2px;
-    opacity: 0;
+    align-items: center;
+    gap: 1px;
+    margin-left: auto; /* 没有时间戳时也贴右边（回答详情的右下角） */
+    opacity: 0.35;
     transition: opacity 0.12s;
   }
-  .msg:hover .msg-acts {
+  .msg:hover .msg-acts,
+  .msg:focus-within .msg-acts {
     opacity: 1;
   }
   .msg-act {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     border: none;
     background: transparent;
     color: var(--g4);
     font-size: 11px;
-    padding: 2px 5px;
+    padding: 3px 4px;
     border-radius: 6px;
     cursor: pointer;
     line-height: 1.4;
@@ -9519,9 +9591,12 @@
     color: var(--g7);
   }
   .msg-act svg {
-    width: 13px;
-    height: 13px;
+    width: 14px;
+    height: 14px;
     display: block;
+  }
+  .msg.selecting {
+    cursor: pointer;
   }
   .msg-check {
     display: flex;
@@ -9534,11 +9609,14 @@
     width: 15px;
     height: 15px;
     cursor: pointer;
+    /* 整行点击负责勾选：复选框只做指示，避免 label/change + 行 click 双触发 */
+    pointer-events: none;
   }
   .edit-box {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    width: 78%;
   }
   .edit-area {
     width: 100%;

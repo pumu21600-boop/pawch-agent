@@ -52,22 +52,34 @@ pub struct ChatRequest {
     pub plan_mode: bool,
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 本轮上下文 = 会话文件里的历史 + 本条新用户消息（见 chat() 里「历史的事实源」那段）。
 /// 文件末尾已经是同一条用户消息（同一条重发）就不重复接，免得上下文里同一句话出现两遍。
 /// 接不上（请求尾不是用户消息且 message 为空）时按原样返回文件历史，宁可少接不乱接。
 fn merge_file_history(mut file_msgs: Vec<Value>, req_history: &[Value], message: &str) -> Vec<Value> {
-    let tail = req_history
+    let mut tail = req_history
         .last()
         .filter(|m| m.get("role").and_then(Value::as_str) == Some("user"))
         .cloned()
         .or_else(|| (!message.trim().is_empty()).then(|| json!({ "role": "user", "content": message })));
-    if let Some(last) = tail {
+    if let Some(last) = tail.as_mut() {
+        // 发送时间随消息落盘（2026-10-27）：前端气泡本来有 ts，但历史请求里没有，
+        // 重开/切回会话后用户消息的时间就消失了。模型请求侧由 sanitize 剥掉 ts。
+        if last.get("ts").and_then(Value::as_u64).is_none() {
+            last["ts"] = json!(now_ms());
+        }
         let already = file_msgs
             .last()
             .map(|p| p.get("role").and_then(Value::as_str) == Some("user") && p.get("content") == last.get("content"))
             .unwrap_or(false);
         if !already {
-            file_msgs.push(last);
+            file_msgs.push(last.clone());
         }
     }
     file_msgs
@@ -177,6 +189,16 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
     if let Some(f) = session.get(&session_id) {
         history = merge_file_history(f.messages, &history, &message);
     }
+    // 新会话没有文件可合并（history 直接来自请求）：补上本条 user 的发送时间，
+    // 免得第一条消息重开后再也看不到时间。模型请求侧由 sanitize 剥掉。
+    if let Some(obj) = history
+        .iter_mut()
+        .rev()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+        .and_then(Value::as_object_mut)
+    {
+        obj.entry("ts").or_insert_with(|| json!(now_ms()));
+    }
     let mut run_flag = state.cancel.try_begin(&session_id);
     if run_flag.is_none() {
         if !attachments.is_empty() {
@@ -268,8 +290,8 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
             let mut merged = if snap.is_empty() { history.clone() } else { snap };
             for s in &extra {
                 merged.push(match s.mode {
-                    SteerMode::Interrupt => json!({ "role": "user", "content": s.text, "interrupted": true }),
-                    _ => json!({ "role": "user", "content": s.text, "steered": true }),
+                    SteerMode::Interrupt => json!({ "role": "user", "content": s.text, "interrupted": true, "ts": now_ms() }),
+                    _ => json!({ "role": "user", "content": s.text, "steered": true, "ts": now_ms() }),
                 });
             }
             observability::event(
@@ -1007,8 +1029,8 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
         let turn_msgs: Vec<Value> = extra
             .iter()
             .map(|s| match s.mode {
-                SteerMode::Interrupt => json!({ "role": "user", "content": s.text, "interrupted": true }),
-                _ => json!({ "role": "user", "content": s.text, "steered": true }),
+                SteerMode::Interrupt => json!({ "role": "user", "content": s.text, "interrupted": true, "ts": now_ms() }),
+                _ => json!({ "role": "user", "content": s.text, "steered": true, "ts": now_ms() }),
             })
             .collect();
         // 通知前端：这些排队消息现在开始跑了（气泡从「排队中」转成正式消息、开新回答气泡）
@@ -1095,11 +1117,15 @@ mod tests {
         assert_eq!(merged.len(), 2, "同一条不该接第二遍: {merged:?}");
     }
 
-    /// 文件没有历史（新会话）：原样用请求里的 messages。
+    /// 文件没有历史（新会话）：用请求里的 messages，并补上发送时间 ts。
     #[test]
     fn empty_file_falls_back_to_request_messages() {
         let req = vec![json!({"role":"user","content":"第一条"})];
-        assert_eq!(merge_file_history(Vec::new(), &req, "第一条"), req);
+        let merged = merge_file_history(Vec::new(), &req, "第一条");
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["role"], json!("user"));
+        assert_eq!(merged[0]["content"], json!("第一条"));
+        assert!(merged[0]["ts"].as_u64().unwrap_or(0) > 0, "新会话首条也要有发送时间: {merged:?}");
     }
 
     /// 请求尾不是用户消息、但 message 有正文：用 message 补一条，别把这轮的话丢了。
@@ -1110,7 +1136,9 @@ mod tests {
         let req = vec![json!({"role":"user","content":"上一轮"}), json!({"role":"assistant","content":"答完"})];
         let merged = merge_file_history(file, &req, "这轮的话");
         assert_eq!(merged.len(), 3);
-        assert_eq!(merged[2], json!({"role":"user","content":"这轮的话"}));
+        assert_eq!(merged[2]["role"], json!("user"));
+        assert_eq!(merged[2]["content"], json!("这轮的话"));
+        assert!(merged[2]["ts"].as_u64().unwrap_or(0) > 0, "补进来的 user 也要有发送时间: {merged:?}");
     }
 
     #[test]
