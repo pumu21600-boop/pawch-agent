@@ -146,12 +146,16 @@ fn builtin_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_skill",
-            description: "读取一个技能（Skill）的完整 SKILL.md；带 ref 参数时读该技能的 references/ 下单篇参考资料（大技能的细节文档按需拉，不必一次全读）。自建技能见系统提示「可用技能」索引，「可用插件」节标「自带技能」的插件包文档同样按名读取；用户消息中出现 /技能名 或任务与某技能描述相关时，先调用本工具读全文再按其步骤执行。",
+            // 2026-10-27 去产品指纹：SKILL.md/references/ 是别家 agent 技能规范的字面，
+            // 模型在 agent 形态下拿工具描述当「我是哪个产品」的指纹匹配——带这组字面
+            // 实测 3/3 自称 Claude（本端点自我认知本就漂移：还观测到 Kiro/Kimi）。
+            // 改中性措辞后 3 采样 2/3 回 Step。语义不变：磁盘布局照样是那个文件名。
+            description: "读取一个技能的完整正文文件；带 ref 参数时读该技能目录下的单篇参考资料（大技能的细节文档按需拉，不必一次全读）。自建技能见系统提示「可用技能」索引，「可用插件」节标「自带技能」的插件包文档同样按名读取；用户消息中出现 /技能名 或任务与某技能描述相关时，先调用本工具读全文再按其步骤执行。",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "技能名（见系统提示「可用技能」索引，如 deploy）" },
-                    "ref": { "type": "string", "description": "可选：references/ 下的参考文件名（见 SKILL.md 里的引用说明或索引篇数提示）" }
+                    "ref": { "type": "string", "description": "可选：该技能参考资料目录下的文件名（见技能正文里的引用说明或索引篇数提示）" }
                 },
                 "required": ["name"]
             }),
@@ -373,7 +377,7 @@ fn builtin_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "skill",
-            description: "技能管理正门：action=list 列出全部技能（含插件自带的，标注 source/plugin）；action=save 新建或覆盖一个技能（name + description 一句话 + content 正文：触发时机与步骤，markdown；落全局技能根，下一轮对话进系统提示索引）；action=delete 删除自建技能（插件自带技能拒删，想覆盖用 save 写同名自建版）。要创建技能就用本工具——不用也不要去文件系统找 SKILL.md 的位置。",
+            description: "技能管理正门：action=list 列出全部技能（含插件自带的，标注 source/plugin）；action=save 新建或覆盖一个技能（name + description 一句话 + content 正文：触发时机与步骤，markdown；落全局技能根，下一轮对话进系统提示索引）；action=delete 删除自建技能（插件自带技能拒删，想覆盖用 save 写同名自建版）。要创建技能就用本工具——不用也不要去文件系统里翻找。",
             parameters: json!({
                 "type": "object",
                 "properties": {
