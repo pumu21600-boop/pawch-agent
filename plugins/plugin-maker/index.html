@@ -70,6 +70,7 @@
 let seq = 0;
 const pending = new Map();
 let booted = false;
+let wsTouched = false; // 用户手选过工作区：切项目时保留他的选择，没手选过则跟随当前
 
 window.addEventListener('message', (ev) => {
   const d = ev.data || {};
@@ -86,6 +87,9 @@ window.addEventListener('message', (ev) => {
     if (!r) return;
     pending.delete(d.id);
     d.ok ? r.res(d.result) : r.rej(new Error(String(d.result || '请求失败')));
+  }
+  if (d.type === 'pawch:event' && d.event === 'workspace' && booted) {
+    loadWorkspaces();
   }
 });
 
@@ -114,7 +118,18 @@ async function boot() {
     refresh();
     growReq();
   };
-  // 工作区列表：当前置顶 + 最近（去重）。workspace.info 是只读桥，不占权限
+  $('ws').onchange = () => {
+    wsTouched = true;
+  };
+  await loadWorkspaces();
+  refresh();
+  fit();
+}
+
+// 工作区列表：当前置顶 + 最近（去重）。workspace.info 是只读桥，不占权限。
+// 宿主切工作区会推 event=workspace；不重拉的话下拉一直标旧项目为「当前」，
+// 旧项目被移除后还会留着一个点进去必失败的路径。
+async function loadWorkspaces() {
   let current = '';
   let recent = [];
   try {
@@ -134,11 +149,12 @@ async function boot() {
     }
   }
   if (!list.length) list.push('');
+  const prev = $('ws').value;
   $('ws').innerHTML = list
     .map((w, i) => `<option value="${esc(w)}">${i === 0 ? '（当前）' : ''}${esc(w.split(/[\\/]/).filter(Boolean).pop() || w)}</option>`)
     .join('');
-  refresh();
-  fit();
+  // 用户手选过的工作区还在表里就保留；否则回到当前（默认跟随当前项目）。
+  $('ws').value = wsTouched && prev && list.includes(prev) ? prev : current || list[0] || '';
 }
 
 // 需求框随输入长高（封顶 200，超出内部滚），长高后同步弹窗高度

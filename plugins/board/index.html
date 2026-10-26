@@ -340,6 +340,13 @@
           const p = pending.get(d.id);
           pending.delete(d.id);
           d.ok ? p.resolve(d.result) : p.reject(new Error(String(d.result)));
+          return;
+        }
+        // 宿主切工作区：树/平铺清单/当前浏览根全是旧工作区范围，必须重拉；
+        // 旧选中文件也一并清掉，避免预览一个已不属于当前项目的路径。
+        if (d.type === 'pawch:event' && d.event === 'workspace' && booted) {
+          selection = '';
+          loadAll();
         }
       });
 

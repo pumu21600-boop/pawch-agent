@@ -189,6 +189,10 @@ timeout_ms = 5000
 > ** 真机坑（面板插件必读）**：宿主在面板 iframe 的 `load` 事件之后才登记该 frame，
 > 之前的 postMessage 会被宿主按「未知来源」丢弃。因此**初始拉数据必须等宿主推来的
 > `pawch:init` 再发起**（见 plugins/trace/index.html），脚本一加载就调用只读桥会一直超时。
+>
+> 宿主还会推 `pawch:event`（旧前缀 `agent:event` 同发一个版本）：`event:"session"` 带
+> `id`（当前会话切换），`event:"workspace"` 带 `path`（工作区切换）。面板里按工作区/
+> 会话取的数据要跟着刷新；不认识的事件按契约忽略。
 
 ## 八、准入机制的现状（2026-10-08：审核与验签移除，生态起来再重建）
 

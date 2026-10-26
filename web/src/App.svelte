@@ -698,6 +698,7 @@
   }
 
   function applyState(s) {
+    const prevWorkspace = workspace;
     savedBaseUrl = s.base_url || '';
     if (!editingField('baseUrl')) baseUrl = s.base_url || '';
     model = s.model || '';
@@ -715,6 +716,13 @@
     features = s.features || { roles: true, css_tool: true, galaxy: true };
     workspaceAliases = s.workspace_aliases || {};
     workspace = s.workspace || '';
+    // 工作区换了：面板插件（插件制作器的工作区下拉、项目文件树）只在 init 时读一次
+    // workspace.info，不通知就一直显示旧项目的路径和文件（2026-10-27 E2E 实锤：
+    // 切回原工作区后制作器下拉仍标旧项目为「当前」）。切会话有 session 事件，工作区同理。
+    if (
+      prevWorkspace &&
+      normPath(prevWorkspace).toLowerCase() !== normPath(workspace).toLowerCase()
+    ) notifyExtsWorkspace(workspace);
     recentWorkspaces = s.recent_workspaces || [];
     // 圆环常驻：会话未开始时也用配置预算初始化（context_length 或全局默认 96000）
     if (!ctxUsage.window) {
@@ -5468,6 +5476,13 @@
   function notifyExtsSession(id) {
     for (const e of enabledExts) {
       postToNameBoth(e.name, { type: 'pawch:event', event: 'session', id: id || '' });
+    }
+  }
+  /// 广播「当前工作区变了」：插件面板常驻不重载，工作区范围的数据（文件树、
+  /// 工作区下拉）必须跟着刷新，否则切项目后还显示旧项目的清单。
+  function notifyExtsWorkspace(path) {
+    for (const e of enabledExts) {
+      postToNameBoth(e.name, { type: 'pawch:event', event: 'workspace', path: path || '' });
     }
   }
   /// 切换当前会话的唯一入口：赋值 + 广播。
