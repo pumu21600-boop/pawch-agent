@@ -143,8 +143,28 @@ pub(crate) async fn turn_system_prompt(state: &AppState) -> String {
     // 配置都是日常）。此前模型把「配置的模型」当成「自己是什么」的权威答案，追问身份
     // 就去读设置——前提补全后配置回答不了这个问题，模型自然落回自身认知。
     let routing_fact = "\n\n【模型路由】设置里的渠道与模型字段是发请求用的路由参数：请求声明想要哪个模型名，由端点方实际应答；同一个标签后面实际挂的模型随时可能换。\n";
+    // 当前渠道/模型常驻提示（2026-10-27 用户定案）：身份问答必须一句话直答，不许为
+    // 答个身份去调 settings 工具（用户实锤「问它是什么模型它直接去读模型配置」）。
+    // 与【工作区】同款思路：信息直接给足，模型照读即可；放这里跨轮字节稳定
+    // （system 缓存前缀纪律，见本函数上方注释）。
+    let model_hint = {
+        let s = state.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let cfg = s.active_or_default();
+        let model = cfg.effective_model();
+        let vendor = gateway::providers::find(&cfg.provider_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| cfg.provider_id.clone());
+        format!(
+            "\n\n【当前模型】当前渠道配置「{cfg}」，模型 {model}（{vendor}）。\
+             用户问「你是什么模型」「你的身份」这类问题：一句话答「我是 {model}，{vendor}的模型」——\
+             不要去读设置、不要调工具、不主动展开，用户追问了再说。\n",
+            cfg = cfg.name,
+            model = model,
+            vendor = vendor,
+        )
+    };
     let selfop = selfop_policy(state);
-    format!("{prompt}{memory_md}{workspace_hint}{routing_fact}{skills_index}{ui_index}{selfop}")
+    format!("{prompt}{memory_md}{workspace_hint}{routing_fact}{model_hint}{skills_index}{ui_index}{selfop}")
 }
 
 /// 新会话第一轮的「项目现状」brief（上一条同项目会话 + 工作区未提交改动）。
