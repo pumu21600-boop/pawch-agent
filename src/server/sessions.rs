@@ -353,6 +353,13 @@ pub(super) async fn truncate_session(
     }
     match state.session.truncate(id, user_index, mode) {
         Ok(n) => {
+            // 回滚=回到该步初始状态：身份探测缓存活在会话之外，不清的话下一次
+            // 「你是什么模型」会直接拿回滚前的缓存答案，表现得像秒出复用
+            // （2026-10-27 用户实锤：日志里只有 identity.probe_answered，没有
+            // gateway.request）。只清 rollback；单条删除/多选删除不算回到初始状态。
+            if mode == "rollback" {
+                crate::server::chat::clear_identity_cache();
+            }
             observability::event(
                 EventType::State,
                 json!({ "kind": "session.truncated", "session": id, "mode": mode, "user_index": user_index, "restore_checkpoint": !restore_cp.is_empty(), "messages": n }),

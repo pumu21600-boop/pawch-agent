@@ -63,6 +63,13 @@ pub(crate) fn cached(ch: &Channel) -> Option<String> {
     None
 }
 
+/// 清空探测缓存：回滚=回到该步初始状态，下一次身份问题必须重新问模型，
+/// 不能拿回滚前的缓存答案冒充新回答（2026-10-27 用户实锤「秒出=复用」）。
+/// 缓存是渠道级的，清掉只影响下一次探测多走一次真实请求，不伤会话数据。
+pub(crate) fn clear_cache() {
+    cache().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 fn store(ch: &Channel, answer: &str) {
     let answer = sanitize(answer);
     if answer.is_empty() {
@@ -184,5 +191,16 @@ mod tests {
         assert_eq!(sanitize("我是 Step，由阶跃星辰开发。\n多余"), "我是 Step，由阶跃星辰开发。");
         assert_eq!(sanitize("`Step`"), "Step");
         assert_eq!(sanitize("  "), "");
+    }
+
+    #[test]
+    fn clear_cache_drops_entries() {
+        let key = "__clear_cache_test__".to_string();
+        cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.clone(), Entry { answer: "Step".into(), at: Instant::now() });
+        clear_cache();
+        assert!(!cache().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&key));
     }
 }

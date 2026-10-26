@@ -11,6 +11,7 @@ mod media;
 mod turn;
 
 pub(crate) use cancel::*;
+pub(crate) use identity::clear_cache as clear_identity_cache;
 pub(crate) use media::*;
 pub(crate) use turn::*;
 
