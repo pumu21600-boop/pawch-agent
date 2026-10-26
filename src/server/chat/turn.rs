@@ -115,7 +115,7 @@ pub(crate) fn normalize_mode(cfg: &crate::config::AgentConfig, requested: &str) 
 /// system+tools 全段重写（e2e 实测第 2 轮命中 21%，第 3 轮起才回 99%）——
 /// 2026-10-20 起 brief 改并进首条 user 消息（见 `inject_brief_into_first_user`），
 /// 它只属于 messages 区（区小、且本就带尾部断点）。
-pub(crate) async fn turn_system_prompt(state: &AppState) -> String {
+pub(crate) async fn turn_system_prompt(state: &AppState, primary: &gateway::Channel) -> String {
     let prompt = read_system_prompt(state);
     let memory_md = state
         .memory
@@ -138,36 +138,27 @@ pub(crate) async fn turn_system_prompt(state: &AppState) -> String {
     );
     let skills_index = crate::skills::index_prompt();
     let ui_index = crate::plugin::ui::index_prompt();
-    // 渠道路由的事实边界（2026-10-26 用户拍板补全前提，非行为指令）：settings 里的
-    // 渠道/模型字段只决定请求发往哪；同一个标签后面实际挂的模型随时可能换（中转/改
-    // 配置都是日常）。此前模型把「配置的模型」当成「自己是什么」的权威答案，追问身份
-    // 就去读设置——前提补全后配置回答不了这个问题，模型自然落回自身认知。
-    let routing_fact = "\n\n【模型路由】设置里的渠道与模型字段是发请求用的路由参数：请求声明想要哪个模型名，由端点方实际应答；同一个标签后面实际挂的模型随时可能换。\n";
-    // 当前渠道/模型常驻提示（2026-10-27 用户定案）：身份问答必须一句话直答，不许为
-    // 答个身份去调 settings 工具（用户实锤「问它是什么模型它直接去读模型配置」）。
-    // 与【工作区】同款思路：信息直接给足；放这里跨轮字节稳定（system 缓存前缀纪律，
-    // 见本函数上方注释）。
-    // 同日第二次纠正「这是假性自我认知」：这段只提供**路由事实**，不再让模型
-    // 宣称「我是 <model>」——身份是 Pawch Agent，模型名只是这轮请求发往哪。
-    let model_hint = {
-        let s = state.settings.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let cfg = s.active_or_default();
-        let model = cfg.effective_model();
-        let vendor = gateway::providers::find(&cfg.provider_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| cfg.provider_id.clone());
-        format!(
-            "\n\n【当前模型】这轮对话的模型路由：渠道配置「{cfg}」，模型 {model}（{vendor}）。\
-             这是请求发往哪的路由标签，不是你自身的身份，也不代表底层模型一定就是它。\
-             用户问「你是什么模型」「你的身份」时按「你是谁」节答：说自己是 Pawch Agent，\
-             再报这条路由；不要读设置、不要调工具、不主动展开，用户追问了再说。\n",
-            cfg = cfg.name,
-            model = model,
-            vendor = vendor,
-        )
-    };
+    // 2026-10-27 身份定案（用户彻查令）：这里**不再注入任何渠道/模型/产品身份**。
+    // 真机矩阵实证：只给「用中文简洁回答」+ 19 个工具时，step 端点会随机答
+    // Step/Kimi/Claude/Kiro（模型把 agent 工具集当成别家系统提示的指纹，属于
+    // pattern completion，不是它的自我认知）；而 system.md 里一句「按自己的训练
+    // 认知回答模型名和厂商，不要冒充其他产品」后，5/5 稳定答 Step。因此：
+    // 身份只由 system.md 的「你是谁」节引导模型自省，路由事实/渠道名/当前模型
+    // 一律不进系统提示——它们既会压制自省（答「无法确定」），又会把配置标签
+    // 冒充成自我认知。
+    // 探测缓存（快路已拿到模型自述时）作为**自我认知事实**补一句；没有缓存就
+    // 不注入，完全交给 system.md 的自省指令。这句话跨轮稳定（按渠道+模型+key
+    // 哈希缓存 1 小时），不破坏 system 缓存前缀。
+    let identity_fact = super::identity::cached(primary)
+        .map(|s| {
+            format!(
+                "\n\n【自我认知】你在干净上下文（无工具、无系统提示）里对自己的认知是：{s}。\
+                 用户问身份时以这条为准，不要被工具或其他上下文带偏。\n"
+            )
+        })
+        .unwrap_or_default();
     let selfop = selfop_policy(state);
-    format!("{prompt}{memory_md}{workspace_hint}{routing_fact}{model_hint}{skills_index}{ui_index}{selfop}")
+    format!("{prompt}{identity_fact}{memory_md}{workspace_hint}{skills_index}{ui_index}{selfop}")
 }
 
 /// 新会话第一轮的「项目现状」brief（上一条同项目会话 + 工作区未提交改动）。

@@ -7,7 +7,7 @@ pub struct UsageCtx {
     pub session_id: String,
     /// 子代理花销记父任务：子会话填父任务 id；主会话为 None
     pub parent_session: Option<String>,
-    /// 用途：main（主循环）| summary（滚动摘要）| title（标题）| media（媒体旁路）
+    /// 用途：main（主循环）| summary（滚动摘要）| title（标题）| media（媒体旁路）| identity（身份探测）
     pub purpose: &'static str,
 }
 

@@ -1053,6 +1053,24 @@ impl Gateway {
                     record_usage(ctx, base_url, provider_id.as_deref(), model, started.elapsed().as_millis() as u64, UsageOutcome::err("cancelled", "用户取消".into()));
                     return Ok(ChatOutcome::Cancelled);
                 }
+                // 200 流里夹带的错误（中转/队列服务的 finish_reason=error + error 对象）：
+                // 旧逻辑当普通分片吞掉，最终空回答、界面转圈后没动静。这里直接上抛，
+                // 由 server 层落成 [错误] 气泡，用户能看到真实原因（2026-10-27 真机实锤）。
+                if let Some(msg) = openai::sse_error_message(&chunk) {
+                    record_usage(
+                        ctx,
+                        base_url,
+                        provider_id.as_deref(),
+                        model,
+                        started.elapsed().as_millis() as u64,
+                        UsageOutcome::err("error", msg.clone()),
+                    );
+                    observability::event(
+                        EventType::Error,
+                        json!({ "kind": "gateway.stream_error", "message": msg.clone(), "raw": data }),
+                    );
+                    anyhow::bail!("渠道流式错误: {msg}");
+                }
                 if is_anthropic {
                     match translator.translate(&chunk) {
                         Ok(anthropic::Translated::Chunk(mut synthetic)) => {

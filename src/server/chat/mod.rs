@@ -6,6 +6,7 @@ use super::memory::read_system_prompt;
 use super::subagent;
 use crate::core::steer::SteerMode;
 mod cancel;
+mod identity;
 mod media;
 mod turn;
 
@@ -421,11 +422,76 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
         // 先把会话 id 告诉前端（新建时它还不知道）
         send(json!({ "session": session_id }));
 
+        // 渠道组装提前：普通主循环与「身份快路」共用同一份主渠道（请求级
+        // model/base_url/key 覆盖也在这里生效）。
+        let ch = assemble_turn_channels(&state, &s, &active_cfg, &req_model, &req_base_url, &req_api_key);
+        for n in &ch.notices {
+            send(json!({ "notice": n }));
+        }
+
+        // 纯身份问题快路（2026-10-27 用户彻查令）：带 19 个工具的主循环会被
+        // agent 工具集带偏（真机矩阵：step 随机答 Step/Kimi/Claude/Kiro），而
+        // 同一渠道的裸请求 5/5 答 Step。这里用干净上下文探测直接答，不经过工具；
+        // 结果缓存 1 小时，并把自述写进后续系统提示的【自我认知】。
+        // 只拦短句纯身份问题；带任务/附件/排队消息一律走普通主循环。
+        if identity::is_identity_question(&message)
+            && !req.steer
+            && !req.interrupt
+            && !req.plan_mode
+            && attachments.is_empty()
+            && state.steer.pending(&session_id) == 0
+        {
+            match identity::probe(&state, &ch.primary, &session_id).await {
+                Ok(answer) => {
+                    let mut msgs = session.get(&session_id).map(|f| f.messages).unwrap_or_default();
+                    let same = msgs
+                        .last()
+                        .and_then(|m| {
+                            (m.get("role").and_then(Value::as_str) == Some("user"))
+                                .then(|| m.get("content").and_then(Value::as_str) == Some(message.as_str()))
+                        })
+                        .unwrap_or(false);
+                    if !same {
+                        msgs.push(json!({ "role": "user", "content": message, "ts": now_ms() }));
+                    }
+                    let stats = json!({
+                        "model": ch.primary.model,
+                        "provider_id": ch.primary.params.provider_id,
+                        "identity_probe": true,
+                    });
+                    msgs.push(json!({ "role": "assistant", "content": answer, "ts": now_ms(), "stats": stats.clone() }));
+                    let prior = session.get(&session_id).and_then(|f| f.summary);
+                    if let Err(e) = session.save(&session_id, &msgs, prior.as_deref()) {
+                        observability::event(EventType::Error, json!({ "message": format!("身份问答落盘失败: {e}") }));
+                    }
+                    observability::event(
+                        EventType::State,
+                        json!({
+                            "kind": "identity.probe_answered",
+                            "session": session_id,
+                            "model": ch.primary.model,
+                            "answer": answer,
+                        }),
+                    );
+                    send(json!({ "turn_stats": stats }));
+                    send(json!({ "content": answer }));
+                    send(json!({ "done": true }));
+                    return;
+                }
+                Err(e) => {
+                    // 探测失败不堵路：提示后继续普通主循环（可能被工具带偏，
+                    // 但用户至少拿到回答或真实错误）。
+                    observability::event(EventType::Error, json!({ "message": format!("身份探测失败: {e}") }));
+                    send(json!({ "notice": format!("身份探测失败（{e}），改用普通对话回答") }));
+                }
+            }
+        }
+
         // 系统约定 + 双层 AGENTS.md + 技能索引（与无头会话同一组装路径）。
         // **不含**「项目现状」brief——它只在新会话第一轮出现，放进系统提示会让
         // 第 2 轮 system 变短、system+tools 稳定区缓存全失效（e2e 实测第 2 轮
         // 命中 21%）；改并进首条 user 消息，随 messages 区走（turn.rs 有完整纪律注释）。
-        let system_prompt = turn_system_prompt(&state).await;
+        let system_prompt = turn_system_prompt(&state, &ch.primary).await;
 
         // 多模态媒体理解流水线：感知媒体附件与视觉/视频/音频解析能力
         let mut history = history;
@@ -769,11 +835,8 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
             // （2026-10-06 真机实锤：模型收不到附件路径，靠 dir 翻目录才找到文件）。
             apply_projections_to_last_user(&mut history, &projections);
         }
-        // 请求级覆盖 + 角色/降级渠道组装（与无头会话同一路径；提示见 notices）
-        let ch = assemble_turn_channels(&state, &s, &active_cfg, &req_model, &req_base_url, &req_api_key);
-        for n in &ch.notices {
-            send(json!({ "notice": n }));
-        }
+        // 渠道已在任务开头组装（身份快路与主循环共用），这里不再重复组装；
+        // 提示也已在开头发给前端。
         // 钩子（027）：单任务累计 token（预算通知用；[hooks] 未配置时零开销）
         // 同一个 Arc 标志同时驱动「剩余步骤改走降级渠道」（核心循环每步读它）
         let task_tokens = std::sync::atomic::AtomicU64::new(0);

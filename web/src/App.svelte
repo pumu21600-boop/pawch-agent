@@ -37,6 +37,7 @@
   let savedBaseUrl = ''; // 已保存的 base_url：只有「获取模型」打的就是这套端点时才据此收敛已选表
   let savedKeyUrl = '';   // 当前激活配置的已存 key 尾号
   let settingsMsg = '';
+  let startupError = ''; // 启动流水线失败（服务未就绪/设置会话读不到）——必须可见
   let settingsOpen = false;
   let autoSaveTimer = null;
   let pendingSave = null; // autoSave 挂起的字段（切换配置前 flush 用）
@@ -397,9 +398,7 @@
   });
 
   onMount(async () => {
-    await loadProviders();
-    await loadSettings();
-    await loadSessions(true);
+    await initStartupData();
     // 手风琴启动归一（用户 2026-10-07：同时只展开一个工作区）：老配置里可能存着
     // 多个展开态（改版前的行为），启动收敛成只展开当前项目
     expandedFlags = workspace ? { [workspace]: true } : { __ungrouped__: true };
@@ -627,6 +626,60 @@
   async function loadSettings() {
     const s = await fetch('/api/settings').then((r) => r.json());
     applyState(s);
+  }
+
+  // —— 启动流水线韧性（2026-10-27 重启丢轨迹根因）——
+  // 桌面壳重启时 webview 可能先于后端就绪：首屏 fetch 直接 Connection refused。
+  // 原实现 `await loadProviders(); await loadSettings(); await loadSessions(true);`
+  // 第一发失败就整条链中断——侧栏空、未选模型、打开一条空新对话，看起来就像
+  // 历史/思考/工具调用全没了（服务其实几秒后就绪，手动刷新即可恢复）。
+  // 现在先等 /api/version 可用（最多 30s），每一步再带退避重试；仍失败就显式
+  // 把错误挂到聊天气泡里，并给「重试」按钮，绝不静默留白。
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function waitForService(timeoutMs = 30000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const r = await fetch('/api/version', { cache: 'no-store' });
+        if (r.ok) return true;
+      } catch (e) {
+        /* 服务还没起：继续等 */
+      }
+      await sleep(400);
+    }
+    return false;
+  }
+  async function retryCall(fn, tries = 5, delay = 400) {
+    let last;
+    for (let i = 0; i < tries; i++) {
+      try {
+        return await fn();
+      } catch (e) {
+        last = e;
+        if (i + 1 < tries) await sleep(delay * (i + 1));
+      }
+    }
+    throw last;
+  }
+  async function initStartupData() {
+    startupError = '';
+    if (!(await waitForService(30000))) {
+      startupError = '[启动失败] 后端服务未就绪（30 秒内 /api/version 无响应）。请点「重试」，或检查服务进程/5173 端口。';
+      return false;
+    }
+    try {
+      await retryCall(loadProviders);
+    } catch (e) {
+      startupError = `[启动警告] 读取供应商失败：${e.message || e}`;
+    }
+    try {
+      await retryCall(loadSettings);
+    } catch (e) {
+      startupError = `[启动失败] 读取设置失败：${e.message || e}`;
+      return false;
+    }
+    await loadSessions(true); // 内部失败会写 startupError（autoPick 分支）
+    return !startupError;
   }
 
   // 正在编辑的字段不的服务端同步覆盖（2026-10-08 修）：settings_changed（外部改
@@ -3419,6 +3472,8 @@
       }
     } catch (e) {
       sessions = [];
+      // 启动路径失败必须可见：否则侧栏空着、看起来像历史全丢（2026-10-27 实锤）
+      if (autoPick) startupError = `[启动失败] 读取会话列表失败：${e.message || e}`;
     }
   }
 
@@ -5764,6 +5819,13 @@
 
     <div class="chat-main">
       <div class="chat-body" bind:this={chatBody} on:scroll={onChatScroll}>
+      {#if startupError}
+        <!-- 启动失败必须可见：服务未就绪时不许只留一个空对话（2026-10-27 实锤） -->
+        <div class="msg error-row startup-error">
+          <div class="error-bubble">{startupError}</div>
+          <button class="btn ghost" on:click={() => location.reload()}>重试</button>
+        </div>
+      {/if}
       {#if messages.length === 0}
         <div class="empty-hint"><div class="empty-title">开始新的对话</div><div class="empty-sub">输入消息后按 Enter 发送，支持粘贴截图与拖拽文件</div></div>
       {/if}
@@ -9531,6 +9593,10 @@
   }
   .error-row {
     justify-content: flex-start;
+  }
+  .startup-error {
+    align-items: center;
+    gap: 8px;
   }
   /* —— 消息操作/边缘时间/多选/信息卡（2026-10-26 用户需求批）——
      2026-10-27 布局重排：操作条从消息左侧/右侧挪到消息下方一行；时间贴行边，

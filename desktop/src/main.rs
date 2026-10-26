@@ -199,7 +199,7 @@ fn ensure_service() -> Option<u32> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        match Command::new(&exe)
+        let pid = match Command::new(&exe)
             // 2026-10-24 修：必须带 --minimized（后台子进程入口，隐藏控制台直接跑服务）。
             // 不带参数会落进「双击」语义——再 spawn 一个分离的 --minimized 子进程后还
             // 打开一次系统默认浏览器（冷启动壳会平白弹个浏览器窗口到用户脸上）。
@@ -220,7 +220,24 @@ fn ensure_service() -> Option<u32> {
                 eprintln!("[desktop] 拉起服务失败: {e}");
                 None
             }
+        };
+        // 2026-10-27 修：spawn 成功 ≠ 5173 已监听。原来立刻建窗口，webview 在服务
+        // 起来之前加载 → 白屏/空会话，看起来像历史与执行轨迹全丢。这里最多等 20s，
+        // 端口可连再开窗；超时也开（前端还有 waitForService/重试兜底）。
+        if pid.is_some() {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while std::time::Instant::now() < deadline {
+                if service_alive() {
+                    println!("[desktop] 服务已就绪");
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            if !service_alive() {
+                eprintln!("[desktop] 服务 20 秒内未就绪，仍打开窗口（前端会提示重试）");
+            }
         }
+        pid
     }
     #[cfg(not(windows))]
     {

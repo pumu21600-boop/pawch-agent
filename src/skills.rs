@@ -483,7 +483,7 @@ pub fn index_prompt() -> String {
         return String::new();
     }
     let mut s = String::from("\n\n## 可用技能（Skills）\n");
-    s.push_str("以下是本环境的自建技能清单。当用户消息中出现 `/技能名`、或任务与某技能的描述明显相关时，先调用 read_skill 工具读取该技能全文，再严格按其步骤执行。\n新建/修改/删除技能一律用 skill 工具（不用去找 SKILL.md 文件在哪）；「可用插件」一节里标了「自带技能」的是插件包内的说明书，read_skill 按名可读，但它们不属于本清单、也改不得：\n");
+    s.push_str("以下是本环境的自建技能清单。当用户消息中出现 `/技能名`、或任务与某技能的描述明显相关时，先调用 read_skill 工具读取该技能全文，再严格按其步骤执行。\n新建/修改/删除技能一律用 skill 工具（不用去文件系统找技能正文文件在哪）；「可用插件」一节里标了「自带技能」的是插件包内的说明书，read_skill 按名可读，但它们不属于本清单、也改不得：\n");
     for sk in &skills {
         let desc = if sk.description.is_empty() {
             "（无描述）"

@@ -410,6 +410,36 @@ pub struct Delta {
     pub finish: Option<String>,
 }
 
+/// 上游把错误塞进 200 的 SSE 分片里（典型：中转/队列服务返回
+/// `finish_reason:"error"` 加顶层 `error:{message:...}`）。这类分片能正常解析，
+/// 旧逻辑当普通分片吞掉，整条流结束时正文为空、界面只看到转圈结束——必须在这里
+/// 认出来并抛给用户。返回 Some(人话错误) 表示这个分片是错误；普通分片返回 None。
+pub(crate) fn sse_error_message(chunk: &Value) -> Option<String> {
+    let finish_error = chunk.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("error");
+    let err = chunk.get("error").filter(|v| !v.is_null());
+    if !finish_error && err.is_none() {
+        return None;
+    }
+    let msg = match err {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+        Some(Value::Object(o)) => o
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                o.get("code")
+                    .filter(|c| !c.is_null())
+                    .map(|c| format!("错误码 {c}"))
+            })
+            .unwrap_or_else(|| Value::Object(o.clone()).to_string()),
+        Some(v) => v.to_string(),
+        None => "上游返回 finish_reason=error，但未附带错误说明".to_string(),
+    };
+    Some(msg)
+}
+
 /// 从分片里提取增量内容与思考内容。
 /// 思考字段取 reasoning_content / reasoning / reasoning_text / reasoning_details 四路，
 /// 按序取第一个非空（含 OpenRouter reasoning_details 的 type=reasoning.text）。
@@ -534,5 +564,27 @@ mod tests {
         assert_eq!(arr[0], json!({"role":"user","content":"问"}), "用户消息只剩协议字段");
         assert_eq!(arr[1], json!({"role":"assistant","content":null,"tool_calls":[{"id":"c1"}]}));
         assert_eq!(arr[2], json!({"role":"tool","tool_call_id":"c1","content":"结果"}));
+    }
+
+    #[test]
+    fn sse_error_message_detects_in_stream_errors() {
+        // 真机样本（api.sunguai.top 队列满）：200 流里 finish_reason=error + 顶层 error
+        let real = json!({
+            "choices":[{"delta":{},"finish_reason":"error","index":0}],
+            "error":{"message":"HTTP 401 403 {\"code\":\"10605\",\"message\":\"queue full\"}"}
+        });
+        assert_eq!(
+            sse_error_message(&real).as_deref(),
+            Some("HTTP 401 403 {\"code\":\"10605\",\"message\":\"queue full\"}")
+        );
+        // 只有 finish_reason=error、没有 error 对象：也要报，不能当空回答
+        let bare = json!({"choices":[{"delta":{},"finish_reason":"error","index":0}]});
+        assert!(sse_error_message(&bare).unwrap().contains("finish_reason=error"));
+        // 顶层 error 字符串
+        let strerr = json!({"error":"queue overloaded"});
+        assert_eq!(sse_error_message(&strerr).as_deref(), Some("queue overloaded"));
+        // 正常分片 / error:null 不算错误
+        assert!(sse_error_message(&json!({"choices":[{"delta":{"content":"好"},"finish_reason":null}]})).is_none());
+        assert!(sse_error_message(&json!({"choices":[{"delta":{}}],"error":null})).is_none());
     }
 }

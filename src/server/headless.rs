@@ -276,12 +276,12 @@ pub(crate) async fn run_headless_inner(
         .unwrap_or_default();
     history.push(json!({ "role": "user", "content": message }));
     let mut prior_summary = state.session.get(&session_id).and_then(|f| f.summary);
-    let system_prompt = turn_system_prompt(&state).await;
+    let ch = assemble_turn_channels(&state, &s, &active_cfg, &req.model, &req.base_url, &req.api_key);
+    let system_prompt = turn_system_prompt(&state, &ch.primary).await;
     // 新会话第一轮：项目现状 brief 并进首条 user 消息（不进系统提示，保缓存前缀，
     // 与 /api/chat 同一路径——见 turn.rs 的 inject_brief_into_first_user 纪律注释）
     let brief = first_turn_brief(&state, &session_id).await;
     inject_brief_into_first_user(&mut history, &brief);
-    let ch = assemble_turn_channels(&state, &s, &active_cfg, &req.model, &req.base_url, &req.api_key);
 
     let mut notices = ch.notices.clone();
     if let Some(n) = mode_notice {

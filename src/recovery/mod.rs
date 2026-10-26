@@ -507,7 +507,9 @@ pub fn restore(ws: &Path, id: &str) -> anyhow::Result<()> {
         touched += 1;
     }
     if touched == 0 {
-        bail!("该检查点之后没有需要回退的文件改动");
+        // 没有文件改动不是失败：这条消息之后可能只聊了天/只调了只读工具。
+        // 回滚还要继续回滚对话状态（2026-10-27 用户定案），这里必须当成功的空操作。
+        return Ok(());
     }
     Ok(())
 }
@@ -1042,6 +1044,25 @@ mod tests {
         // 撤销语义验证：reset 回基线 → 改动还原、任务内新建文件被删、diff 归零
         restore(w, &cp.id).unwrap();
         assert!(!w.join("b.txt").exists(), "结束快照已跟踪的新文件应被回滚删除");
+        assert_eq!(diff_stat(w, &cp.id).unwrap(), (0, 0, 0));
+    }
+
+    #[test]
+    fn restore_without_file_changes_is_ok_noop() {
+        // 2026-10-27 用户实锤：没有文件改动的消息也必须能回滚（回滚=对话+文件），
+        // 原先这里报「没有需要回退的文件改动」把整个 truncate 请求拖成 500。
+        if !git_have() {
+            return;
+        }
+        let ws = temp_ws("restore-noop");
+        let w = ws.path();
+        ws.git(&["init", "--quiet"]);
+        std::fs::write(w.join("a.txt"), "v1\n").unwrap();
+        ws.git(&["add", "a.txt"]);
+        let cp = checkpoint(w, "基线", "sess-test").unwrap().expect("应有检查点");
+
+        restore(w, &cp.id).unwrap();
+        assert_eq!(std::fs::read_to_string(w.join("a.txt")).unwrap(), "v1\n");
         assert_eq!(diff_stat(w, &cp.id).unwrap(), (0, 0, 0));
     }
 
