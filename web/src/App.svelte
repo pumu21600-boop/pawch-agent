@@ -3860,6 +3860,7 @@
     });
     checkedIds = [];
     await loadSessions();
+    await settleCurrentSessionAfterListChange();
   }
 
   async function batchDelete() {
@@ -3919,6 +3920,30 @@
     await loadSessions();
   }
 
+  // 归档/删除当前会话后的落点：只切到**同工作区**最近一条未归档会话；没有就
+  // 在当前工作区新开一条。2026-10-27 用户实锤：归档当前会话时 next 用了全局
+  // sessions.find，切到了另一个（刚被移除的）工作区的会话——loadSession 会经
+  // /api/sessions/open 把工作区切回去，看起来像已删工作区被复原。绝不跨工作区。
+  async function settleCurrentSessionAfterListChange() {
+    if (!currentSessionId) return;
+    const cur = sessions.find((x) => x.id === currentSessionId);
+    if (cur && !cur.archived) return;
+    if (!workspace) {
+      await startNewSession();
+      return;
+    }
+    const ws = normPath(workspace).toLowerCase();
+    const next = sessions.find(
+      (x) =>
+        x.id !== currentSessionId &&
+        !x.archived &&
+        x.workspace &&
+        normPath(x.workspace).toLowerCase() === ws,
+    );
+    if (next) await loadSession(next.id);
+    else await startNewSession();
+  }
+
   async function toggleArchive(s) {
     sessMenuId = null;
     await fetch('/api/sessions/meta', {
@@ -3930,11 +3955,7 @@
     // 归档的正是当前会话：切到同项目最近一条未归档会话，没有则回新会话空态。
     // 不切的话服务端 current 仍指向归档会话——侧栏看不见它，输入却还在往里写
     // （2026-10-24 E2E D2 实锤：归档当前会话后发消息，消息进了归档会话）。
-    if (s.id === currentSessionId && !s.archived) {
-      const next = sessions.find((x) => !x.archived && x.id !== s.id);
-      if (next) await loadSession(next.id);
-      else await startNewSession();
-    }
+    if (s.id === currentSessionId && !s.archived) await settleCurrentSessionAfterListChange();
   }
 
   async function forkSession(id) {
@@ -4550,7 +4571,8 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: m.id, archived: m.on !== false }),
         });
-        loadSessions();
+        await loadSessions();
+        await settleCurrentSessionAfterListChange();
       },
     },
     delete_session: {
