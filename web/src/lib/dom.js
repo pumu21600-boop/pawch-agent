@@ -167,7 +167,7 @@ export const ELEMENT_ALIASES = [
   { sel: '.term-text', name: '终端输出文本' },
   { sel: '.cp-bar', name: '改动条', pick: 'self' },
   { sel: '.cp-btn', name: '改动条按钮' },
-  { sel: '.new-chat', name: '新会话按钮' },
+  { sel: '.new-chat', name: '新对话按钮' },
   { sel: '.chat-head', name: '顶栏', pick: 'self' },
   { sel: '.right-panel', name: '产物面板', pick: 'self' },
   { sel: '.rp-tabs', name: '产物面板标签栏', pick: 'self' },

@@ -579,7 +579,13 @@ pub(crate) fn decode_entities(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
-        let window = &tail[..tail.len().min(12)];
+        // 12 字节是实体名（含 `#xxxx;`）的最长窗口，但**不能按字节硬切**：切口落在
+        // 多字节字符中间会 panic（`&amp;中文…` 这种中文搜索结果里是常态）。
+        // 按字符边界取前 12 个字符。
+        let window: &str = match tail.char_indices().nth(12) {
+            Some((end, _)) => &tail[..end],
+            None => tail,
+        };
         let Some(semi) = window.find(';') else {
             out.push('&');
             rest = &tail[1..];
@@ -667,8 +673,22 @@ mod tests {
     }
 
     #[test]
-    fn html_to_text_survives_unicode_case_mapping() {
-        // 2026-10-08 修：İ 的小写映射 2 字节→3 字节（U+212A 则反向少 2 字节），
+    fn decode_entities_never_slices_through_multibyte_chars() {
+        // 2026-10-30 修：实体名窗口原来是 `&tail[..min(12)]` 按**字节**硬切，切口落在
+        // 多字节字符中间直接 panic——含 `&` 且 12 字节内有中文的页面（中文搜索结果常态）
+        // 会让 web_search/web_fetch 崩。改成按字符边界取 12 个字符。
+        assert_eq!(decode_entities("结果 &amp;中文中"), "结果 &中文中");
+        assert_eq!(decode_entities("&amp;中文中文中文"), "&中文中文中文");
+        // 没有分号的裸 & 保留原字符，不吞后文
+        assert_eq!(decode_entities("a & b中文"), "a & b中文");
+        // 常规实体照旧解码
+        assert_eq!(decode_entities("&lt;x&gt; &quot;y&quot;"), "<x> \"y\"");
+        // 长实体（`&#x1F600;` 之类）窗口不够时按无分号处理，不 panic
+        assert!(decode_entities("&#12345678901234;").contains('&'));
+    }
+
+    #[test]
+    fn html_to_text_survives_unicode_case_mapping() {        // 2026-10-08 修：İ 的小写映射 2 字节→3 字节（U+212A 则反向少 2 字节），
         // 偏移错位后拿 html 的字节下标切 to_lowercase() 副本会 panic 或切错内容。
         // ASCII 等长小写副本后：标签照剥、正文按原样保留。
         let html = "a\u{0130}<b>bold</b><script>evil()</script>tail";

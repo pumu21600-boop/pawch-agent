@@ -523,8 +523,15 @@ impl Settings {
     /// 逐级迁移：旧版单 key / keys 映射 -> configs 专属 key。
     pub fn load(seed_base_url: &str, seed_model: &str) -> Self {
         let path = Self::path();
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            match settings_from_text(&text) {
+        // 读不出 ≠ 文件不存在。文件在、但 read_to_string 失败（非 UTF-8：用户用 GBK
+        // 编辑器改过；ACL 只读；瞬时共享冲突）时**绝不能**当首次启动处理——那条路
+        // 会用默认设置把用户的 key 密文 / MCP servers / 定时任务整份覆盖掉（write 会
+        // 成功而 read 失败，数据直接没了）。走与「解析失败」同一条兜底：坏文件先改名
+        // 备份再重建默认；连改名都失败就干脆不落盘，盘上原文件原样留着。
+        // （对照 session::save 的同构防线「存在却读不出就拒绝覆写」，2026-10-08 已建）
+        let mut allow_save = true;
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match settings_from_text(&text) {
                 Ok(s) => {
                     // 落盘前留一份 .bak（2026-10-04 真机教训：settings.json 丢过一次
                     // 整个 mcp_servers，触发原因没定位到，先保证任何丢失可回退一份）
@@ -535,18 +542,17 @@ impl Settings {
                 Err(e) => {
                     // 解析失败：坏文件先改名备份，绝不静默用种子覆盖用户配置
                     eprintln!("[settings] 解析失败（{e}），坏文件备份后重建默认设置");
-                    let bak = path.with_extension(format!(
-                        "json.corrupt-{}",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0)
-                    ));
-                    let _ = std::fs::rename(&path, &bak);
+                    allow_save = backup_corrupt(&path);
                 }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // 首次启动：走下方种子
+            }
+            Err(e) => {
+                eprintln!("[settings] 读取失败（{e}），按坏文件处理：改名备份后重建默认设置");
+                allow_save = backup_corrupt(&path);
             }
         }
-        // 文件不存在：首次启动走下方种子
 
         let mut s = Self::default();
         let model = if seed_model.is_empty() {
@@ -573,7 +579,11 @@ impl Settings {
             capabilities_user_set: false,
         });
         s.ensure_active_config();
-        let _ = s.save();
+        // 坏文件没能改名备份（文件被占用/只读）时不落盘：宁可这次用默认值跑，
+        // 也不要把盘上那份原文件盖掉——用户的 key 和配置还在里面。
+        if allow_save {
+            let _ = s.save();
+        }
         s
     }
 
@@ -949,6 +959,32 @@ pub(crate) fn settings_from_text(text: &str) -> Result<Settings, serde_json::Err
 
 fn new_config_id() -> String {
     format!("cfg-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// 把坏掉的 settings.json 改名成 `settings.json.corrupt-<epoch>` 留档。
+/// 返回 true = 已成功挪走（调用方可以安全落盘新文件）；false = 挪不动（被占用/
+/// 只读），此时**必须放弃落盘**，否则会把用户盘上那份原文件整份覆盖掉。
+fn backup_corrupt(path: &std::path::Path) -> bool {
+    let bak = path.with_extension(format!(
+        "json.corrupt-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    ));
+    match std::fs::rename(path, &bak) {
+        Ok(()) => {
+            eprintln!("[settings] 坏文件已备份到 {}，将重建默认设置", bak.display());
+            true
+        }
+        Err(e) => {
+            eprintln!(
+                "[settings] 坏文件改名失败（{e}），本次不落盘——盘上的 settings.json 原样保留: {}",
+                path.display()
+            );
+            false
+        }
+    }
 }
 
 /// settings.json 解析唯一入口：先过一遍旧字段名迁移（纯函数），再按类型反序列化。

@@ -143,6 +143,16 @@ fn safe_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// 空会话的占位标题（2026-10-30 用户拍板统一叫「新对话」）。旧占位「新会话」继续
+/// 按占位处理——盘上存量会话带的是旧值，不认它就会把「新会话」当真实标题显示出来。
+pub(crate) const PLACEHOLDER_TITLE: &str = "新对话";
+const LEGACY_PLACEHOLDER_TITLE: &str = "新会话";
+
+fn is_placeholder_title(t: &str) -> bool {
+    let t = t.trim();
+    t == PLACEHOLDER_TITLE || t == LEGACY_PLACEHOLDER_TITLE
+}
+
 fn first_user_title(messages: &[Value]) -> String {
     messages
         .iter()
@@ -165,7 +175,7 @@ fn first_user_title(messages: &[Value]) -> String {
                 s.chars().take(30).collect::<String>()
             }
         })
-        .unwrap_or_else(|| "新对话".to_string())
+        .unwrap_or_else(|| PLACEHOLDER_TITLE.to_string())
 }
 
 /// RFC3339 → 本地「月-日 时:分」，给项目现状摘要用（解析失败原样返回，不报错）。
@@ -385,8 +395,10 @@ impl SessionManager {
 
     /// 全部会话元信息：置顶优先，其余按更新时间新→旧（归档项一并返回，由前端过滤）。
     /// 标题兜底（2026-10-02 用户实锤「@对话列表全显示新会话」）：标题模型没跑成的
-    /// 会话 title 停在占位「新会话」，列表里一片同名不可辨。占位/空标题时回落首条
-    /// 用户消息前 20 字；一条消息都没有的显示「空会话」。
+    /// 会话 title 停在占位标题，列表里一片同名不可辨。占位/空标题时回落首条
+    /// 用户消息前 20 字；一条消息都没有的显示「新对话」。
+    /// 占位判定要同时认「新对话」（2026-10-30 起的统一叫法）与「新会话」（旧占位，
+    /// 盘上存量会话还是这个值）——只认新值的话，老空会话会带着旧名一路显示下去。
     pub fn list(&self) -> Vec<SessionMeta> {
         let mut metas: Vec<SessionMeta> = Vec::new();
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
@@ -399,7 +411,7 @@ impl SessionManager {
             }
             let Ok(text) = std::fs::read_to_string(&p) else { continue };
             let Ok(f) = serde_json::from_str::<SessionFile>(&text) else { continue };
-            let title = if !f.title.trim().is_empty() && f.title != "新会话" {
+            let title = if !f.title.trim().is_empty() && !is_placeholder_title(&f.title) {
                 f.title
             } else {
                 first_user_title(&f.messages)
@@ -863,12 +875,12 @@ mod tests {
         m.delete(&a).unwrap();
     }
 
-    /// 点「新会话」立即落盘并进列表；同工作区复用空会话，有消息的不算空。
+    /// 点「新对话」立即落盘并进列表；同工作区复用空会话，有消息的不算空。
     #[test]
     fn create_empty_session_is_listed_and_reused() {
         let (_d, m) = mgr("empty-new");
         let ws = "C:\\ws\\demo";
-        let f = m.create_empty(ws, "新会话").unwrap();
+        let f = m.create_empty(ws, PLACEHOLDER_TITLE).unwrap();
         assert!(f.messages.is_empty());
         assert_eq!(f.workspace, ws);
         let list = m.list();
@@ -877,19 +889,31 @@ mod tests {
         assert_eq!(list[0].title, "新对话", "空会话回落首条消息兜底（无消息=新对话）");
 
         // 同工作区再次新建 → 复用同一条，连点不堆空会话
-        let f2 = m.create_empty(ws, "新会话").unwrap();
+        let f2 = m.create_empty(ws, PLACEHOLDER_TITLE).unwrap();
         assert_eq!(f2.id, f.id);
         assert_eq!(m.list().len(), 1);
 
         // 换工作区 → 另建一条
-        let f3 = m.create_empty("C:\\ws\\other", "新会话").unwrap();
+        let f3 = m.create_empty("C:\\ws\\other", PLACEHOLDER_TITLE).unwrap();
         assert_ne!(f3.id, f.id);
         assert_eq!(m.list().len(), 2);
 
         // 有消息的会话不再被当作可复用空会话
         m.save(&f.id, &[json!({"role":"user","content":"开始干活"})], None).unwrap();
-        let f4 = m.create_empty(ws, "新会话").unwrap();
+        let f4 = m.create_empty(ws, PLACEHOLDER_TITLE).unwrap();
         assert_ne!(f4.id, f.id, "有消息的会话不该被复用");
+    }
+
+    /// 旧占位「新会话」的存量会话仍按占位处理，显示回落首条消息 / 「新对话」。
+    /// 只认新占位的话，改名之前建的老空会话会顶着旧名一路显示下去。
+    #[test]
+    fn legacy_placeholder_title_still_falls_back() {
+        let (_d, m) = mgr("legacy-placeholder");
+        let ws = "C:\\ws\\demo";
+        let f = m.create_empty(ws, "新会话").unwrap();
+        assert_eq!(m.list()[0].title, "新对话", "旧占位（无消息）= 新对话");
+        m.save(&f.id, &[json!({"role":"user","content":"真实的第一句"})], None).unwrap();
+        assert_eq!(m.list()[0].title, "真实的第一句", "旧占位（有消息）回落首条消息");
     }
 
     #[test]

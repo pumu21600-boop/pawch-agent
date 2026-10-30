@@ -814,13 +814,13 @@ fn risk_simple_command(cmd: &str, ws: &Path) -> (RiskLevel, String) {
 
     // 2.5) 复合/包裹命令：危险动词藏在参数里（if exist x del x / cmd /c del /
     // powershell -c "del" / wsl rm）——载体程序名扫剩余 token，命中即高危
-    if COMPOUND_WRAPPERS.contains(&prog.as_str()) {
-        if let Some(d) = dangerous_token_in(&rest[1.min(rest.len())..]) {
-            return (
-                RiskLevel::Dangerous,
-                format!("复合命令内嵌高危命令 {d}: {trimmed}"),
-            );
-        }
+    if COMPOUND_WRAPPERS.contains(&prog.as_str())
+        && let Some(d) = dangerous_token_in(&rest[1.min(rest.len())..])
+    {
+        return (
+            RiskLevel::Dangerous,
+            format!("复合命令内嵌高危命令 {d}: {trimmed}"),
+        );
     }
 
     // 3) SQL 类破坏性语句（非程序名场景，保留子串兜底）

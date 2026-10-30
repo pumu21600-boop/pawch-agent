@@ -85,9 +85,12 @@ foreach ($item in @("config.toml", "providers.json", "README.md", "LICENSE")) {
     $p = Join-Path $root $item
     if (Test-Path $p) { Copy-Item $p $out } else { Warn "missing $item" }
 }
-foreach ($dir in @("prompts", "plugins", "ui-ext")) {
+# skills/ 是全局技能根（app_root/skills，见 src/skills.rs::global_skills_root）——
+# 漏掉它等于发行版比开发版少六个内置技能（docx/pdf/pptx/xlsx/git-commit/github）
+foreach ($dir in @("prompts", "plugins", "ui-ext", "skills")) {
     $p = Join-Path $root $dir
     if (Test-Path $p) { Copy-Item $p (Join-Path $out $dir) -Recurse -Force }
+    elseif ($dir -eq "skills") { Warn "missing skills/ - release build will ship without built-in skills" }
 }
 
 # bundled MinGit (skip quietly when the project has not fetched it)

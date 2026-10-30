@@ -35,6 +35,8 @@ const ALLOW = [
   // workspace/raw 端点本身：只有它才走二进制取回（arrayBuffer/blob）。
   [/workspace\/raw.*\)\.then\(\(r\) => \{$/, 'workspace/raw 二进制取回（图片/pdf/xlsx 预览）：then 体内读 arrayBuffer()/blob()，16 行扫描窗看不见'],
   [/await fetch\('\/api\/ui\/state'/, 'state 上报：发了就忘，故意不读响应体（多窗口后报者覆盖前报者）'],
+  // 启动探活（waitForService）：只判 r.ok 知道服务起没起，本来就没有响应体要读
+  [/await fetch\('\/api\/version'/, '启动探活：只判 r.ok，不读响应体'],
 ];
 
 function walk(dir, out = []) {

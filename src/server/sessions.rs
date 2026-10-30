@@ -169,7 +169,7 @@ pub struct SessionOpenRequest {
 /// 侧栏马上能见到该会话；首条消息随后写入同一条。同工作区已有空会话则复用。
 pub(super) async fn new_session(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
     let ws = crate::tools::workspace_root().display().to_string();
-    match state.session.create_empty(&ws, "新会话") {
+    match state.session.create_empty(&ws, crate::session::PLACEHOLDER_TITLE) {
         Ok(f) => {
             observability::event(
                 EventType::State,

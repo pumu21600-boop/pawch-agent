@@ -60,6 +60,31 @@ jobs:
         working-directory: web
         run: npm ci
 
+      # 前端没有单测框架，这类回归靠静态体检兜：「fetch 之后忘 .json()」这个 bug 类
+      # 在本仓复发过两次（Response 当数据用 → 界面静默显示空值；Response 进
+      # postMessage → 插件面板整块瘫），脚本就是为它建的，必须进门禁
+      - name: fetch 解析体检
+        run: node scripts/check_fetch_json.mjs
+
       - name: 构建（产物 web/dist，服务直接托管）
         working-directory: web
         run: npm run build
+
+  # 桌面壳是独立 crate（start.bat 日常入口会一并起它，内置浏览器就是壳里的 child
+  # webview），但它不参与根 crate 的 clippy/test——之前 CI 里连编译都没验证过，
+  # 编不过只会在用户机器上炸。这里补一道最小编译门禁。
+  desktop:
+    name: 桌面壳（构建）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: 构建壳
+        working-directory: desktop
+        run: cargo build

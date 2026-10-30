@@ -249,6 +249,11 @@ pub fn dismiss_notice(state: &AppState, key: &str) -> Result<(), String> {
         return Err("这条记录已经不在列表里了（可能已过期）".into());
     }
     {
+        // settings 写互斥（与 save_schedule/put_settings 同一条锁序：
+        // settings_write → settings RwLock）。少了这把锁，本函数与「拷一份→改→存盘→
+        // 整份写回」的 put_settings 并发时，两边各按陈旧基线落盘，后写者把先写者的
+        // 字段整份覆盖（2026-10-08 已修过同类 lost update，这里是漏网的同一模式）。
+        let _w = state.settings_write.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = state.settings.write().unwrap_or_else(|e| e.into_inner());
         s.schedule_dismissed.retain(|k| k != &key);
         s.schedule_dismissed.push(key);
@@ -509,6 +514,10 @@ fn write_back(
     error: Option<&str>,
     session: Option<&str>,
 ) {
+    // settings 写互斥：本函数的调用方（定时心跳 / 立即运行）与 UI 的 put_settings
+    // 并发时，没有这把锁就会各按陈旧基线落盘、后写者整份覆盖先写者
+    //（与 dismiss_notice 同一条理由；锁序：settings_write → settings RwLock）。
+    let _w = state.settings_write.lock().unwrap_or_else(|e| e.into_inner());
     let mut s = state.settings.write().unwrap_or_else(|e| e.into_inner());
     if let Some(t) = s.schedules.iter_mut().find(|x| x.id == task_id) {
         if auto {

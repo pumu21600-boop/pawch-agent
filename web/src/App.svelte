@@ -1108,40 +1108,34 @@
   // 侧栏只收编这三个宿主面板插件（时间线/项目文件/用量）——其余插件哪怕 manifest 声明
   // dock 也不进侧栏，+ 菜单与选择页都不出（用户 2026-10-03：装的插件别全列出来，六个够了）
   const RP_EXT_PANELS = new Set(['trace', 'board', 'usage']);
-  // 2026-10-10 之前的首启默认（用户点名的五个面板）。存档里还是这五个且一字不差 =
-  // 从没自定义过，按新默认（零标签页）迁走。
-  const LEGACY_DEFAULT_KEYS = ['ext:trace', 'ext:board', 'artifacts', 'web', 'ext:usage'];
   function rpDefaultTabs() {
     return [];
   }
+  // 页签列表与面板开合同一生命周期：**会话级**（sessionStorage）——刷新本页保留，重开
+  // 软件从零开始（用户 2026-10-30 复述 10-10 的决定：打开侧栏不该自己冒出任何面板）。
+  // 曾经存 localStorage：面板关着、页签列表却在重启后原样恢复，用户点开侧栏时
+  // 「上次开着的那个面板」就成了默认值（实锤：重启后点开侧栏直接是「用量价格」）。
+  // 旧 localStorage 键一次性清掉，避免旧记录继续误导。
+  try {
+    localStorage.removeItem('rpTabs');
+    localStorage.removeItem('rpTab');
+  } catch {}
   let rpTabs = (() => {
     try {
-      const raw = JSON.parse(localStorage.getItem('rpTabs') || 'null');
+      const raw = JSON.parse(sessionStorage.getItem('rpTabs') || 'null');
       if (Array.isArray(raw) && raw.length) {
-        // 老存档里的「审查」标签（key=review）迁成 git（同位置不改用户其余标签）
-        const tabs = raw
+        return raw
           .map((t) => (t && t.key === 'review' ? { ...t, key: 'git', kind: 'git', title: 'git' } : t))
           .filter((t) => t && t.key && t.kind && (t.kind !== 'ext' || RP_EXT_PANELS.has(t.name)));
-        if (tabs.map((t) => t.key).join(',') === LEGACY_DEFAULT_KEYS.join(',')) {
-          return rpDefaultTabs(); // 老默认未动过 → 零标签页
-        }
-        return tabs;
       }
     } catch {}
     return rpDefaultTabs();
   })();
-  // 老 localStorage（单 rpTab：'preview'/'ext:x'/'web'）迁移：'preview' 已撤（预览改为
-  // 按文件开标签），插件 key 不在列表就补一条，实在对不上就用第一个标签。
+  // 激活页签：只在恢复出来的列表里找，对不上就退回第一个（零页签时为空 = 选择页）。
   // 零标签页时不要把旧激活 key 的 ext 面板推回来——那会把「默认零标签」破功。
   let rpTab = (() => {
-    const want = (localStorage.getItem('rpTab') || '').replace(/^review$/, 'git'); // 老「审查」激活标签跟着迁
-    if (rpTabs.some((t) => t.key === want)) return want;
-    if (rpTabs.length && want.startsWith('ext:') && RP_EXT_PANELS.has(want.slice(4))) {
-      const name = want.slice(4);
-      rpTabs.push({ key: want, kind: 'ext', name, title: name });
-      return want;
-    }
-    return (rpTabs[0] || {}).key || '';
+    const want = (sessionStorage.getItem('rpTab') || '').replace(/^review$/, 'git'); // 老「审查」激活标签跟着迁
+    return rpTabs.some((t) => t.key === want) ? want : (rpTabs[0] || {}).key || '';
   })();
   let rpAddOpen = false; // 标签栏 + 号的添加菜单
   let rpFiles = [];
@@ -1463,17 +1457,30 @@
     }
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-    // 宽度直接应用（同侧栏：mousemove 按帧合并，不做 rAF 中转）
+    // 合帧：一帧最多写一次宽度（pointermove 本身就可能一帧多次）。写宽度会触发整个
+    // 聊天列重排，直接按事件写会让拖拽掉帧、面板跟手也发涩。
+    let latestX = 0;
+    let rafId = 0;
+    const apply = () => {
+      rafId = 0;
+      rpWidth = Math.min(820, Math.max(320, Math.round(window.innerWidth - latestX)));
+    };
     const move = (ev) => {
-      rpWidth = Math.min(820, Math.max(320, Math.round(window.innerWidth - ev.clientX)));
+      latestX = ev.clientX;
+      if (!rafId) rafId = requestAnimationFrame(apply);
     };
     const up = () => {
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+        apply();
+      }
       rpResizing = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       localStorage.setItem('rpWidth', String(rpWidth));
-      // 拖拽期间视口同步被让路（见 webSyncViewport），停手补发最后一次：
-      // 面板最终宽度立刻通知到壳里 webview / 截图
+      // 无头模式的视口同步在拖动期被压掉（见 webSyncViewport），停手补发最后一次；
+      // 壳模式拖动中就一直跟着发，这里只是把落定的矩形再确认一遍（去重键挡重复）
       webQueueViewport();
       handle.removeEventListener('pointermove', move);
       handle.removeEventListener('pointerup', up);
@@ -1486,12 +1493,14 @@
 
   $: webActive = webTabs.find((t) => t.id === webActiveId) || null;
   // 右侧面板开合/标签持久化（换任何路径改这几个状态都会落盘）。
-  // rpOpen 走 sessionStorage：刷新不关、重开软件关（2026-10-10 用户拍板默认关）。
+  // rpOpen/rpTabs/rpTab 都走 sessionStorage：刷新本页不关、重开软件从零开始
+  //（2026-10-10 用户拍板默认关着；2026-10-30 复述并补齐页签列表——之前只有开合
+  //  是会话级，页签列表还是 localStorage，重启后点开侧栏会自己恢复上次的面板）。
   $: {
     try {
       sessionStorage.setItem('rpOpen', rightPanelOpen ? '1' : '0');
-      localStorage.setItem('rpTab', rpTab);
-      localStorage.setItem('rpTabs', JSON.stringify(rpTabs));
+      sessionStorage.setItem('rpTab', rpTab);
+      sessionStorage.setItem('rpTabs', JSON.stringify(rpTabs));
     } catch {}
   }
   // 空白页（about:blank）显示空态引导；有地址就渲染截图
@@ -1732,8 +1741,7 @@
       if (rootEl) webRectObs.unobserve(rootEl);
       window.removeEventListener('resize', webOnWindowResize);
     }
-  }
-  function webOnWindowResize() {
+  }  function webOnWindowResize() {
     webQueueViewport();
   }
   // 面板在原生托管且停在「网页」时才需要跟（壳里 webview 的显隐与它联动）
@@ -1753,10 +1761,13 @@
   }
   function webSyncViewport() {
     if (!webActive || rpTab !== 'web') return;
-    // 拖右面板手柄期间让路：每拖一帧 ResizeObserver 就开火一次，这里会 POST 视口 +
-    // 触发截图重拉，网络往返全卡在主线程同一批任务里，拖拽一顿一顿的。
-    // 停手时 startRpResize 的 up 会补发最后一次（下面的去重键保证不会重复发）。
-    if (rpResizing) return;
+    // 拖右面板手柄期间：**壳模式照常同步**（那只是把矩形经控制通道发过去挪 child
+    // webview，一个本地写，很便宜）。2026-10-07 曾为治「拖侧栏巨卡」整段 return，
+    // 结果壳里网页整个拖拽过程都不跟手、松手才跳一下——用户 2026-10-30 复述
+    // 「调宽不丝滑、画面和实际宽度一直不同步」，就是这条让路挡的。
+    // 真正贵的是**截图流**（无头模式：每发一次视口就触发一次 <img> 重载 + CDP
+    // 往返），所以只让无头模式让路；截图刷新（webShotT）在拖动期也一起压掉。
+    if (rpResizing && !webNative) return;
     // 就绪门：浏览器状态没到手前，web-tabbar 行未定型（有标签=多一行 / 无标签=整行消失），
     // 量的矩形是瞬态——发出去 webview 会先跳错位再跳回。等 loadWebState 就绪后补发。
     if (!webStateReady) return;
@@ -1784,7 +1795,7 @@
       .then((res) => {
         // 服务端拒收（越界等）：清 key，等下一次观察器/节流开火重试，别把坏矩形当成已应用
         if (res && res.skipped) webViewportKey = '';
-        else webShotT += 1;
+        else if (!rpResizing) webShotT += 1; // 拖动中不触发截图重载（那是卡顿的来源）
       })
       .catch(() => {
         webViewportKey = ''; // 失败重试
@@ -1990,7 +2001,7 @@
       const r = await fetch(`/api/checkpoints${q}`).then((r) => r.json());
       const mine = (r.mine || [])[0];
       if (mine) return { id: mine.id, note: '' };
-      return { id: '', note: currentSessionId ? '该会话运行时还没有检查点（产物归因需要任务起点快照）' : '新会话还没有任务记录' };
+      return { id: '', note: currentSessionId ? '该会话运行时还没有检查点（产物归因需要任务起点快照）' : '新对话还没有任务记录' };
     } catch (e) {
       return { id: '', note: `读取检查点失败: ${e.message || e}` };
     }
@@ -4839,8 +4850,26 @@
       async run({ reply, get, params }) {
         const group = params.group === 'model' ? 'model' : 'provider';
         const range = ['today', '7d', '30d', 'all'].includes(params.range) ? params.range : 'all';
-        // 面板口径 = 当前对话：session 由宿主注入（插件拿不到别的会话的也不该看）
-        const sid = encodeURIComponent(currentSessionId || '');
+        // 面板口径 = 当前对话：session 由宿主注入（插件拿不到别的会话的也不该看）。
+        // 没有当前会话（新对话还没落 id / 刚启动）时**不能**拿空串去查——后端的空
+        // session 是「全量」口径，面板会显示全部历史会话的累计（用户 2026-10-30 实锤：
+        // 还没聊过一句就显示 20 亿输入 token、¥781 花费）。这里回零值 + 真实价格表口径，
+        // 让面板走「本次对话还没有模型调用」空态。
+        if (!currentSessionId) {
+          let prices = {};
+          try { prices = await get('/api/usage/prices'); } catch (e) { prices = {}; }
+          reply(true, {
+            currency: prices.currency || 'USD',
+            usd_cny_rate: prices.usd_cny_rate || 7.2,
+            totals: { prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0, requests: 0, errors: 0, cost_usd: 0 },
+            priced: true,
+            spend_total_usd: prices.spend_total_usd || 0,
+            spend_cap_usd: prices.spend_cap_usd || 0,
+            session: '',
+          });
+          return;
+        }
+        const sid = encodeURIComponent(currentSessionId);
         reply(true, await get(`/api/usage?group=${group}&range=${range}&session=${sid}`));
       },
     },
@@ -5610,7 +5639,7 @@
 
       <button class="new-chat" on:click={startNewSession}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8" stroke-linecap="round"/></svg>
-        新会话
+        新对话
       </button>
 
       <div class="section-row bar-menu">
@@ -5758,7 +5787,7 @@
             展开其余 {row.rest} 个会话
           </button>
         {:else}
-          <div class="side-empty">{searchQ ? '没有匹配的会话' : '暂无会话，点上方「新会话」开始'}</div>
+          <div class="side-empty">{searchQ ? '没有匹配的会话' : '暂无会话，点上方「新对话」开始'}</div>
         {/if}
       {/each}
     </div>

@@ -128,6 +128,7 @@ function render(r, ctx) {
   $('spend').textContent = money(r.spend_total_usd);
   $('cap').textContent = r.spend_cap_usd > 0 ? money(r.spend_cap_usd) : '不限';
   if (!t.requests) {
+    // 会话级明细归零：累计花费仍由下方 footer 显示（那是全局口径，与当前对话无关）
     $('body').innerHTML = '<div class="empty">本次对话还没有模型调用。</div>';
     return;
   }
