@@ -85,6 +85,14 @@
 | 10-08 续 bug 修复轮（本轮） | 第二轮五+三路普查。判级/安全：git 全局选项引号值绕过（split_whitespace 把真子命令吞掉，push/clean 降级 Normal，已实测）、插件 origin_of 自声明 source 免验签（model_generated 后门）、判级 workspace 基准用全局而非任务钉住值。数据丢失：session 落盘把「读不出」当新会话覆写元数据、memory sync 无串行化 + 固定 tmp 名、settings 写锁 7 处漏挂、skills delete 兜底误删项目级、plugin remove 裸文件连坐删 plugins/ 根。前端：McpTab 添加 MCP 四参调用 100% 不可用、ScheduleTab 读取失败提示被当场清掉、深色主题缺 orange 等 4 组 tint、escalateCss 注释盲区、MemoryTab 回读失败静默、ScheduleTab 下拉不建依赖、SkillsTab 改名留旧副本。eval：切换工作区不验 HTTP 状态码（会驱动到用户真实项目）、SSE 断流不验 done（假绿）、会话泄漏、setup 路径未消毒、AGENTS.md 豁免假绿。收尾：sandbox_selftest 空结果假绿、session_approval/approval_meta 只增不减、storage 读错误吞、wasm read_cstr 超大分配、recovery rename 键不匹配、best_window Unicode panic、文档漂移（README 11 处/契约端点/ROADMAP 补登） | ✅ 已完成（本地提交） |
 | 10-08 标志与文档收口轮（用户直派） | README 精简重写（426→203 行：接口全表 50+ 条移至 docs/api.md，砍进度长链、插件数据桥大表改一行列举、用量三节合并；去「ZCode 式」「类 Codex」表述；顺手修正两处过期事实——MCP OAuth 早已上线、步数上限默认 0=不限）。全仓清除旧阶段编号标志（源码注释 / 文档正文 / 34 个施工单与报告文件名 git mv；git tag 名如 v0.2-p1 是历史标识符，保留）。去除非 UI 面的模仿表述（「类 Codex 编码 Agent」、施工单里的「Codex 式」、技能加固与 OAuth 注释里的「对齐 ZCode」；浏览器命令协议/快照/隔离世界与 MCP OAuth 的 Apache-2.0 移植归属注释按许可要求保留，网关思考参数的 OpenClaw 移植出处同理）。trust.rs 的 pin 域前缀 zcode-plugin-digest→agent-plugin-digest（无存量 pin；顺手清掉 settings.json 里已删测试插件 plugins:a 的残留 pin）。CSS 规则导出文件的 type 字段 zcode-ui-css-rules→agent-ui-css-rules（导入有 customCss 兜底，旧文件照常可导入）。界面里参照 ZCode 的 32 处注释（约 22 个功能点：加号菜单/思考 pill/双计时/无气泡用户消息/diff 双行号列/面板与终端拖拽调尺寸/标签页规则/无边框窗口按钮/git 紧凑行与就地 diff/插件页紧凑行/审查范围选择器等）原样保留，怎么表达待用户定 | ✅ 已完成（本地提交） |
 | 10-08 插件制作器 + 审核/pin 移除（用户直派） | **A 插件制作器**（plugins/plugin-maker/，内置插件）：用户想法「说清需求 → 一键起对话带规范提示词」。插件 UI 没有宿主模态原语，**表单即窗口**——需求多行输入 + 工作区下拉（只读桥 workspace.info 的 {current, recent}，去重、当前置顶）+ 确定；确定后走新桥 `session.create`（新权限 session.create，进 ui.rs 白名单）：有会话在跑则拒（切项目会断流）→ 目标工作区非当前则 applyWorkspace 切过去（没切成就不建会话，防会话落错项目）→ startNewSession → input 预填 + 聚焦，**不代发**（用户自己审自己回车）。机制全是现成管道拼装（applyWorkspace/startNewSession/bind:value），宿主侧零新端点。提示词模板内联在插件页 index.html（改模板不用重编译宿主）：用户原话 + 契约规范（manifest 字段表/权限白名单/postMessage 桥协议/主题契约）+ 最小可用示例（manifest + index.html 骨架全内联——新对话开在用户选的工作区，够不着应用目录的参考实现）+ 安装验证引导（写进 plugins/ 即加载、自检清单、设置→插件「打开」试用）+ 诚实汇报纪律。入口：设置→插件页「打开」。**交互形态返工（用户 2026-10-08 当晚二次反馈）**：第一版把表单开在右侧大面板（`aside.ext-panel`）——用户要的是「点打开 → 弹出小窗口 → 确定后跳新会话」，连侧栏形态都不要；新增 manifest 可选字段 `popup:true`（UiExt 透出），openExt 据此开**居中小窗口**（模态 iframe，560px、可 backdrop 关闭），设置弹窗同时让位，`session.create` 成功后小窗自动关闭、用户直接落进新对话。无头浏览器复验 9/9 过（弹窗出现/非侧面板/设置让位/宽高居中/确定关窗/预填/新会话/backdrop 可关/零 pageerror）。**B 审核与 pin 一并移除**（用户拍板：提示词写规范 + 沙箱隔离——面板 iframe 不透明源、WASM 零宿主函数——崩了不连坐，两道门在生态没起来时只是安装摩擦；生态上来再重建，git 删除提交可捞回）：删 review.rs/trust.rs 两个模块、/api/plugins/review 与 /api/plugins/trust 两端点、plugin 工具的 review/unpin action 与 install 的 force 参数、rules 判级 force 臂、ReviewModal.svelte 与行内审核 chip/自动预审/信任按钮、settings 的 trusted_plugins 字段与迁移、serve_plugin 与 ui/wasm/skill_roots 四道验签门、plugin.trust_* 三个审计 kind。保留：draft 隔离区（权限清空/内存态）、停用语义、manifest 契约校验、source 三值（删除保护/draft 归属/来源标注）。**顺手修一个既有启动 bug**（真机对照实验实锤）：App 的 async onMount 续体里调 `onDestroy` 注册点击外部收菜单的清理——await 之后 `current_component` 已空，每次开页面都抛「Function called outside component initialization」且抛出会打断后面的启动续体（stampMicroUids 等不跑）；监听与清理移进同步 onMount 的返回值（对照组：修复前纯开页面即报错，修复后零报错）。文档收口：契约文档第八节重写为「准入机制现状」、api.md/jsonl-schema/README/system.md 同步。测试 387 过 + 前端构建过 + 隔离实例真机全流程（表单→确定→新对话预填/切工作区分支/浅色主题/免激活加载）全过 | ✅ 已完成（本地提交） |
+| 10-09~10-10 记忆系统 + 上下文瘦身 | 记忆系统第 0–8 步（profile.md 行级读写/上限预警/memory.write 工具/注入/面板第四签/隐私闸）+ memory 检索工具接进 agent（受 galaxy 闸）；工具定义去重，新会话基线 9.7k→约 8.5k；右侧边栏默认零标签页、自动记忆签拆掉条目卡片 | ✅ 已完成（tag v0.32.32，10-10 验收）|
+| 10-13 缓存命中率优化 + 工作区切换面板不清 | Anthropic 三断点 + OpenAI prompt_cache_key + MCP/插件工具顺序确定 + 动态内容沉尾，台账显示缓存命中率；同轮修切工作区后 git/产物面板停在旧数据（5 天前基线里的幽灵删除），加 stale_subtree_warning | ✅ 已完成（已推送）|
+| 10-20~10-21 免打扰自治四轮 + 收口 | ①缓存命中率四个真问题（断点兜底/空串尾/插件工具顺序/load_inline 重排）②子代理实时条 + 回看面板 ③web_fetch JS 渲染回退 + page_text ④computer 工具（截图/键鼠/窗口 + 多模态回传）；收尾修 5 个待办 bug（含停止按钮在静默渠道上的两条失效链路）；CI clippy 20 条清零转绿；项目定名 Pawch Agent、远端仓库改名 pawch-agent | ✅ 已完成（tag v0.32.33，10-21 验收）|
+| 10-22 批次八项 | 旧设置迁移垫片 / browser 10 方法真模型验证 / 引导中断真机验 / 工具级取消 + 立即发送与引导分家（打断≠引导）/ WASM 宿主函数 / P2 二轮拆分（App.svelte 11316→10716，外观·模型·功能桥接·插件四页签出组件）/ 三条轻微现象排查定性 / 改名迁移轮（crate·用户目录·应用状态目录·环境变量·插件桥协议·tauri id 全换 pawch-agent，一次迁移 + 一版本兼容读）| ✅ 已完成（tag v0.32.34）|
+| 10-24 E2E 首轮 + 修复 + 改名扫尾 | 128 用例 88 过（报告 docs/e2e-2026-10-24/）：D0 rpReviewBaseline 断链、D2 归档当前会话、D3 重命名空值、D4 GFM 表格、D1 安全软件提示全修，D7 复核翻案；补测 12 项全过；内置浏览器 child webview P0 排查（同 UDF 异选项 0x8007139F + tauri 事件循环吞错）并装 SlogLogger 封盲区；改名扫尾（desktop crate 正名、仓库改名后编译期烙路径修复、死工作区登记清理、.gitignore 补 .pawch-agent/）；撤 WASM 宿主权限闸「插件即能力」+ 三个示例插件撤架留夹具 | ✅ 已完成（tag v0.32.35）|
+| 10-25 清理轮 + 子代理模型档 | shell 高危判级复合命令收口（COMPOUND_WRAPPERS 载体表，判级表按首 token 的旁路全堵）；删插件回收面板标签；插件制作器「打开」翻案（面板其实开了、被设置弹窗盖住）；旧审计 05/07 销账；gua 死工作区登记清理；roles.subagent_mode 三档（parent/custom/ask）；网页帧流 native=0 恒 400 修复 | ✅ 已完成（tag v0.32.35）|
+| 10-26 消息操作批 + 四连修 | 用户消息 回滚/编辑/删除/多选 + AI 回复信息卡（TurnStats：首 token 延迟/耗时/用量/实际渠道）+ 消息边缘时间；**回滚 = 文件 + 对话一起**（cp 基线 + recovery::restore 先复原文件再截对话）；删除类一律确认弹窗；四连修 = 接手 brief 只进请求不进落盘 / step_plan 答 Claude 定性 / 报错卡片紧凑 / 模型弹窗保存串行队列。**编辑重发维持只回对话不动文件**（2026-10-30 用户确认：不用回退文件） | ✅ 已完成（tag v0.32.36）|
+| 10-27 身份与体验彻查 | 身份问答四轮收敛（答配置→【当前模型】直给→干净上下文探测快路，真机 step 实答 Step 且零工具）；模型已选按端点返回收敛；重启丢轨迹根因=启动竞态（壳等 5173 再开窗 + 前端退避重试）；转圈不出答案=上游 200 SSE 夹带 error 被吞，网关识别上抛；回滚无文件改动从报错改成功空操作；归档当前会话不跨工作区；面板插件跟随工作区切换；回滚后清身份探测缓存（1h 渠道级缓存活在会话之外） | ✅ 已完成（tag v0.32.36）|
 
 ## 二、对话（施工单）协作约定
 
@@ -194,10 +202,19 @@
 5. ~~**settings.json 旧格式迁移垫片**~~：并入当前批次条目 1（原「留待大版本」提前）。
 6. ~~**prices.json 补全**~~：prices.json 已于退役删除——价格表搬进 settings.json `cost` 节（设置 → 用量价格面板内维护），本待办作废。
 
+**2026-10-30 用户逐条回复（收尾核对）**：
+
+- **编辑重发不回退文件——定案**：回滚（rollback）= 文件 + 对话一起复原；**编辑重发只回对话、不动文件**（改错字重问不该炸掉已完成的改动）。用户表态「不用回退」，此边界关闭，不再挂待定。
+- **P2 二轮拆分视觉验收——已验**：壳内逐页打开外观 / 模型配置 / 功能桥接 / 插件四页签，布局、控件、间距全部正常（截图在案），无错位与空渲染。此项关闭。
+- **git 捆绑——维持待定**（用户「待定」）：代码保持原样，不拆也不扩建，等用户给方案。
+- **三条轻微现象复测**：①壳启动自 resize 一次——本次从启动首帧起连续采样 ~4.8s，`innerWidth×innerHeight` 全程恒定 `1280×860`（150% DPI），**不复现**；②面板首开 30ms 闪现——固有代价（HWND 就位延迟），占位即为此窗口设计，不修；③无头模式「⋯」菜单只有一项——正常设计（无头是截图流没有可挂 DevTools 的实体，壳模式菜单两项齐全）。
+- **获取模型无加载态——不管**（用户 2026-10-30 明确）：现状只有文字提示，不加 disabled/loading。
+- **空会话两个叫法——不改**：侧栏 `新对话`（`session/mod.rs` 首条消息兜底）与顶栏 `新会话`（`server/sessions.rs` 创建占位）是两处不同语义的默认值，用户未要求统一。
+
 **状态更正（本次梳理）**：桌面壳**已启用**（自启用起 = 内置浏览器宿主，非搁置）；此前的“桌面壳待定”已定（保留壳），两行状态已改。
 
 **已知轻微现象（并入当前批次条目 7，排查定性）**：
 
-- 壳启动后窗口会自行 resize 一次（保存的窗口 bounds 恢复时序，启动早期发生；机制待查）。
-- 面板首次打开时 webview 从占位到页面有一次约 30ms 的出现（HWND 就位，固有代价）。
-- 无头模式（普通浏览器开 5173）的「⋯」菜单只有一项（开发者工具仅壳模式有，的行为）。
+- ~~壳启动后窗口会自行 resize 一次~~：2026-10-30 复测从启动首帧连续采样 ~4.8s，窗口尺寸全程恒定 1280×860，不复现；代码侧无 bounds 存取，判定为早期版本/特定环境的一次性观察。
+- 面板首次打开时 webview 从占位到页面有一次约 30ms 的出现（HWND 就位，固有代价，不修）。
+- 无头模式（普通浏览器开 5173）的「⋯」菜单只有一项（开发者工具仅壳模式下有，正常设计）。
