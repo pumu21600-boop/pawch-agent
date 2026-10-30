@@ -3,6 +3,9 @@
 use super::*;
 
 /// GET /api/workspace/files —— 工作区文件相对路径列表（「@ 添加上下文」选择器数据源；有界遍历）
+/// 注意：这里的跳过名单**故意**比文件面板（list_workspace_dir）多一个 `.agent`——
+/// @ 选择器是「挑个文件引用进对话」，项目记忆/影子仓库不该往里混；文件面板是「看项目
+/// 结构」，用户明确要求能看到 `.agent`（2026-10-30）。两边口径不同是有意的。
 pub(super) async fn list_workspace_files() -> Json<Value> {
     const MAX_FILES: usize = 500;
     const SKIP_DIRS: [&str; 9] = [
@@ -102,9 +105,11 @@ pub(super) async fn list_workspace_dir(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     const MAX_ENTRIES: usize = 500;
-    const SKIP_DIRS: [&str; 9] = [
+    // 2026-10-30 用户实锤「项目文件应该可以看到 .agent」：`.agent`（项目记忆 index/
+    // AGENTS.md/影子仓库）从跳过名单里移出——那是用户自己的项目状态，不是构建噪声。
+    // 其余仍是纯噪声/体量炸弹，继续跳过。
+    const SKIP_DIRS: [&str; 8] = [
         ".git",
-        ".agent",
         ".attachments",
         ".workbuddy",
         "node_modules",
