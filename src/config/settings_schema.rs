@@ -592,3 +592,106 @@ fn _compile_time_assertions() {
     let _ = crate::config::settings::shared_settings;
     let _: fn(&mut Settings, &str, &Value) -> Result<String, String> = apply_entry_value;
 }
+
+#[cfg(test)]
+mod tests {
+    //! 设置 schema 是「agent 自改设置」的唯一白名单：一张表同时喂 patch 应用顺序、
+    //! 红线集合、工具描述键清单和 /api/settings/schema。表本身没有类型系统兜底，
+    //! 这些不变式用单测钉死（2026-10-30 工程能力轮）。
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn paths_are_unique_and_non_empty() {
+        let mut seen = HashSet::new();
+        for e in SCHEMA {
+            assert!(!e.path.trim().is_empty(), "path 不能为空");
+            assert!(seen.insert(e.path), "path 重复: {}", e.path);
+            assert!(!e.label.trim().is_empty(), "label 不能为空: {}", e.path);
+            assert!(!e.desc.trim().is_empty(), "desc 不能为空: {}", e.path);
+        }
+    }
+
+    #[test]
+    fn types_and_risks_stay_in_vocabulary() {
+        // 词表与前端/工具描述共用；新增类型必须同步改这里和应用逻辑
+        let types = ["bool", "string", "integer", "float", "string_array", "config_name", "object"];
+        for e in SCHEMA {
+            assert!(types.contains(&e.ty), "未知类型 {}（路径 {}）", e.ty, e.path);
+            assert!(
+                matches!(e.risk, "normal" | "red_line"),
+                "未知风险档 {}（路径 {}）",
+                e.risk,
+                e.path
+            );
+        }
+    }
+
+    #[test]
+    fn enum_values_are_nonempty_and_unique() {
+        for e in SCHEMA {
+            let mut seen = HashSet::new();
+            for v in e.enum_values {
+                assert!(!v.trim().is_empty(), "枚举值不能为空: {}", e.path);
+                assert!(seen.insert(*v), "枚举值重复 {}: {}", v, e.path);
+            }
+        }
+    }
+
+    #[test]
+    fn active_config_id_must_apply_first() {
+        // 注释里的排序约定：切配置必须排在所有渠道字段之前，否则「切完再改参数」
+        // 会落到切换前的配置。这里把它变成可执行断言。
+        assert_eq!(SCHEMA.first().map(|e| e.path), Some("active_config_id"));
+        assert_eq!(application_order().next().map(|e| e.path), Some("active_config_id"));
+    }
+
+    #[test]
+    fn manifest_matches_table_order_and_size() {
+        let m = manifest_json();
+        let paths = m["paths"].as_array().expect("manifest.paths 应为数组");
+        assert_eq!(paths.len(), SCHEMA.len());
+        for (i, e) in SCHEMA.iter().enumerate() {
+            assert_eq!(paths[i]["path"], json!(e.path), "manifest 顺序必须与表一致");
+            assert_eq!(paths[i]["type"], json!(e.ty));
+            assert_eq!(paths[i]["risk"], json!(e.risk));
+        }
+    }
+
+    #[test]
+    fn helper_lookups_agree_with_table() {
+        for e in SCHEMA {
+            assert!(is_known_path(e.path));
+            assert_eq!(risk_of(e.path), Some(e.risk));
+        }
+        assert!(!is_known_path("definitely.not.a.path"));
+        assert_eq!(risk_of("definitely.not.a.path"), None);
+        let red = red_line_paths();
+        let expected: Vec<&str> = SCHEMA
+            .iter()
+            .filter(|e| e.risk == "red_line")
+            .map(|e| e.path)
+            .collect();
+        assert_eq!(red, expected);
+        let hint = legal_paths_hint();
+        for e in SCHEMA {
+            assert!(hint.contains(e.path), "合法路径提示漏了 {}", e.path);
+        }
+    }
+
+    #[test]
+    fn roles_and_features_subpaths_are_consistent() {
+        // roles 点号子路径只能来自这两处的并集：单独列字段 + 整表 roles。
+        let roles: HashSet<&str> = SCHEMA
+            .iter()
+            .filter_map(|e| e.path.strip_prefix("roles."))
+            .collect();
+        for k in ["summary", "title", "vision", "video", "audio", "embedding", "budget", "subagent", "fallbacks"] {
+            assert!(roles.contains(k), "roles.{k} 不在 schema 表内");
+        }
+        // 整表键要在表内（FeatureSettings::set 的键白名单由运行时兜底）。
+        assert!(SCHEMA.iter().any(|e| e.path == "features"));
+        assert!(SCHEMA.iter().any(|e| e.path == "mcp_servers"));
+        assert!(SCHEMA.iter().any(|e| e.path == "schedules"));
+    }
+}

@@ -45,7 +45,7 @@ jobs:
         timeout-minutes: 25
 
   frontend:
-    name: 前端（构建）
+    name: 前端（单测 + 构建）
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +60,13 @@ jobs:
         working-directory: web
         run: npm ci
 
-      # 前端没有单测框架，这类回归靠静态体检兜：「fetch 之后忘 .json()」这个 bug 类
+      # 2026-10-30 起前端有纯逻辑单测（node:test，零额外依赖）：聊天分段/合并、
+      # 工具人话化、markdown 安全渲染。UI 改排布最容易回归的就是这些规则。
+      - name: 前端单测
+        working-directory: web
+        run: npm test
+
+      # 前端没有浏览器单测框架，这类回归靠静态体检兜：「fetch 之后忘 .json()」这个 bug 类
       # 在本仓复发过两次（Response 当数据用 → 界面静默显示空值；Response 进
       # postMessage → 插件面板整块瘫），脚本就是为它建的，必须进门禁
       - name: fetch 解析体检
@@ -69,6 +75,11 @@ jobs:
       - name: 构建（产物 web/dist，服务直接托管）
         working-directory: web
         run: npm run build
+
+      # {@html} 生成的 markdown 元素没有 Svelte 作用域类，样式必须 :global()；
+      # 写错时构建不报错、界面静默退化成默认样式（2026-10-30 实锤），所以构建后验产物。
+      - name: markdown 样式产物检查
+        run: node scripts/check_md_css.mjs
 
   # 桌面壳是独立 crate（start.bat 日常入口会一并起它，内置浏览器就是壳里的 child
   # webview），但它不参与根 crate 的 clippy/test——之前 CI 里连编译都没验证过，

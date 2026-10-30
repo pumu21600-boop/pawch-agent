@@ -1,0 +1,212 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  appendThinking,
+  settleThinking,
+  appendContent,
+  addToolPart,
+  settleToolPart,
+  trimParts,
+  partsFromStoredMessage,
+  mergeAssistantRun,
+  buildBlocks,
+  processSummary,
+  processIsLive,
+  toolMeta,
+  prettyArgs,
+  fmtDurCn,
+} from '../src/lib/chat.js';
+
+test('正文分片紧挨着才续写，遇到工具就开新段（保证时间线顺序）', () => {
+  let p = [];
+  p = appendContent(p, '先看一下');
+  p = appendContent(p, '目录。');
+  p = addToolPart(p, { name: 'list_dir', args: '{"path":"."}', toolIndex: 0 });
+  p = appendContent(p, '目录里有三个文件。');
+  assert.deepEqual(
+    p.map((x) => x.type),
+    ['content', 'tool', 'content']
+  );
+  assert.equal(p[0].text, '先看一下目录。');
+  assert.equal(p[2].text, '目录里有三个文件。');
+});
+
+test('思考分片只和未结束的同一段合并；结算后新分片开新段', () => {
+  let p = [];
+  p = appendThinking(p, '先想');
+  p = appendThinking(p, '一下。');
+  assert.equal(p.length, 1);
+  assert.equal(p[0].text, '先想一下。');
+  p = settleThinking(p, 3200);
+  assert.equal(p[0].done, true);
+  assert.equal(p[0].ms, 3200);
+  p = appendThinking(p, '再想');
+  p = settleThinking(p, 800);
+  assert.equal(p.length, 2);
+  assert.equal(p[1].ms, 800);
+  // 已结算的思考不会被二次结算
+  p = settleThinking(p, 9999);
+  assert.equal(p[1].ms, 800);
+});
+
+test('工具结果只结算最后一个同名 running，失败的留 fail + 预览', () => {
+  let p = [];
+  p = addToolPart(p, { name: 'shell', args: '{"command":"npm test"}', toolIndex: 0 });
+  p = addToolPart(p, { name: 'shell', args: '{"command":"npm run build"}', toolIndex: 1 });
+  p = settleToolPart(p, 'shell', false, 'exit 1');
+  assert.equal(p[0].status, 'running');
+  assert.equal(p[1].status, 'fail');
+  assert.equal(p[1].preview, 'exit 1');
+});
+
+test('降级重试按字符数从尾部裁掉对应类型的文本', () => {
+  let p = [];
+  p = appendThinking(p, 'abcdef');
+  p = appendContent(p, '1234567890');
+  p = trimParts(p, 'content', 4);
+  assert.equal(p[1].text, '123456');
+  p = trimParts(p, 'thinking', 6);
+  assert.equal(p.length, 1);
+  assert.equal(p[0].type, 'content');
+});
+
+test('buildBlocks：连续过程合成块，正文隔断，按真实顺序排列', () => {
+  const parts = [
+    { type: 'thinking', text: '想', ms: 1000 },
+    { type: 'tool', name: 'read_file' },
+    { type: 'content', text: '第一步说明' },
+    { type: 'thinking', text: '再想', ms: 2000 },
+    { type: 'tool', name: 'edit_file' },
+    { type: 'content', text: '最终回答' },
+  ];
+  const blocks = buildBlocks(parts);
+  assert.deepEqual(
+    blocks.map((b) => b.kind),
+    ['process', 'content', 'process', 'content']
+  );
+  assert.equal(blocks[0].items.length, 2);
+  assert.equal(blocks[1].text, '第一步说明');
+});
+
+test('processSummary：思考时长 + 工具数', () => {
+  assert.equal(
+    processSummary([
+      { type: 'thinking', ms: 65000 },
+      { type: 'tool' },
+      { type: 'tool' },
+    ]),
+    '思考 1 分 5 秒 · 2 个工具'
+  );
+  assert.equal(processSummary([{ type: 'tool' }]), '1 个工具');
+});
+
+test('processIsLive：只有执行中的工具/未结算的思考才算活', () => {
+  assert.equal(processIsLive([{ type: 'tool', status: 'ok' }]), false);
+  assert.equal(processIsLive([{ type: 'tool', status: 'running' }]), true);
+  assert.equal(processIsLive([{ type: 'thinking', done: true }]), false);
+  assert.equal(processIsLive([{ type: 'thinking', done: false }]), true);
+});
+
+test('mergeAssistantRun：多步合并成一条，parts 顺序保留、toolIndex 重排', () => {
+  const step1 = {
+    id: 'm1',
+    role: 'assistant',
+    ts: 111,
+    content: '先读文件。',
+    thinking: '想A',
+    thinkMs: 1000,
+    tools: [{ name: 'read_file', args: '{"path":"a.txt"}' }],
+    parts: [
+      { type: 'thinking', text: '想A', ms: 1000, done: true },
+      { type: 'content', text: '先读文件。' },
+      { type: 'tool', toolIndex: 0, name: 'read_file', args: '{"path":"a.txt"}', status: 'ok' },
+    ],
+    stats: null,
+    workMs: 0,
+  };
+  const step2 = {
+    id: 'm2',
+    role: 'assistant',
+    ts: 222,
+    content: '改完了。',
+    thinking: '想B',
+    thinkMs: 2000,
+    tools: [{ name: 'edit_file', args: '{"path":"a.txt"}' }],
+    parts: [
+      { type: 'thinking', text: '想B', ms: 2000, done: true },
+      { type: 'tool', toolIndex: 0, name: 'edit_file', args: '{"path":"a.txt"}', status: 'ok' },
+      { type: 'content', text: '改完了。' },
+    ],
+    stats: { total_tokens: 10 },
+    workMs: 5000,
+  };
+  const [m] = mergeAssistantRun([step1, step2]);
+  assert.equal(m.id, 'm1');
+  assert.equal(m.ts, 111);
+  assert.equal(m.workMs, 5000);
+  assert.deepEqual(m.stats, { total_tokens: 10 });
+  assert.equal(m.content, '先读文件。改完了。');
+  assert.equal(m.thinking, '想A想B');
+  assert.deepEqual(
+    m.parts.map((p) => p.type),
+    ['thinking', 'content', 'tool', 'thinking', 'tool', 'content']
+  );
+  assert.equal(m.parts[4].toolIndex, 1);
+  // 中间有 user 隔断则不能合并
+  const list = mergeAssistantRun([step1, { role: 'user', content: '再说一句' }, step2]);
+  assert.equal(list.length, 3);
+});
+
+test('partsFromStoredMessage：思考 → 正文 → 工具，工具 index 从 0 起', () => {
+  const parts = partsFromStoredMessage({
+    reasoning_content: '想了想',
+    reasoning_ms: 1200,
+    content: '执行。',
+    tool_calls: [
+      { id: 't1', function: { name: 'shell', arguments: '{"command":"dir"}' } },
+      { id: 't2', function: { name: 'read_file', arguments: '{"path":"a"}' } },
+    ],
+  });
+  assert.deepEqual(
+    parts.map((p) => p.type),
+    ['thinking', 'content', 'tool', 'tool']
+  );
+  assert.equal(parts[0].ms, 1200);
+  assert.equal(parts[3].toolIndex, 1);
+  assert.equal(parts[2].id, 't1');
+});
+
+test('toolMeta：不把原始 JSON 糊到脸上，路径/命令进 subject', () => {
+  const w = toolMeta('write_file', '{"path":"src/main.js","content":"<!DOCTYPE html>"}');
+  assert.equal(w.label, '写入文件');
+  assert.equal(w.subject, 'src/main.js');
+  const s = toolMeta('shell', '{"command":"node --version\\n&& echo hi"}');
+  assert.equal(s.label, '执行命令');
+  assert.equal(s.subject, 'node --version && echo hi');
+  const b = toolMeta('browser_navigate', '{"url":"https://example.com"}');
+  assert.equal(b.label, '浏览器');
+  assert.equal(b.subject, 'https://example.com');
+  const unknown = toolMeta('custom_tool', '{"q":"x"}');
+  assert.equal(unknown.label, 'custom_tool');
+  assert.equal(unknown.subject, 'x');
+  // 参数不是 JSON 时原样缩略，不崩
+  const raw = toolMeta('shell', 'npm run build -- --watch');
+  assert.equal(raw.label, '执行命令');
+  assert.equal(raw.subject, 'npm run build -- --watch');
+});
+
+test('prettyArgs：合法 JSON 展开，非法原样，超长截断', () => {
+  assert.equal(prettyArgs('{"a":1}'), '{\n  "a": 1\n}');
+  assert.equal(prettyArgs('{oops'), '{oops');
+  assert.equal(prettyArgs(''), '');
+  const long = prettyArgs(JSON.stringify({ content: 'x'.repeat(9000) }), 100);
+  assert.ok(long.length < 200, String(long.length));
+  assert.ok(long.includes('已截断'), long);
+});
+
+test('fmtDurCn：秒/分/分秒', () => {
+  assert.equal(fmtDurCn(0), '1 秒');
+  assert.equal(fmtDurCn(27000), '27 秒');
+  assert.equal(fmtDurCn(65000), '1 分 5 秒');
+  assert.equal(fmtDurCn(120000), '2 分');
+});
