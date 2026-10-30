@@ -213,7 +213,9 @@ pub fn build_body_with_compat(    model: &str,
                 body["thinking"] = json!({ "type": if t == "off" { "disabled" } else { "enabled" } });
             }
         }
-        // deepseek（V4 Pro/Flash/R1）：thinking 对象；V4 支持 reasoning_effort (low/high/max)
+        // deepseek（V4 Pro/Flash/R1）：thinking 对象；reasoning_effort 规范档只有
+        // none/low/high/max（官方文档，默认 high）——minimal→low、medium/xhigh→high
+        // 是官方自己的兼容折算，这里先折算成规范档再发，绝不外发非规范值
         ThinkingFormat::Deepseek => {
             if let Some(t) = requested {
                 if t == "off" {
@@ -222,11 +224,10 @@ pub fn build_body_with_compat(    model: &str,
                 } else {
                     body["thinking"] = json!({ "type": "enabled" });
                     let eff = match t {
-                        "low" => Some("low"),
-                        "medium" => Some("medium"),
-                        "high" => Some("high"),
-                        "max" | "xhigh" => Some("xhigh"),
-                        _ => None,
+                        "minimal" | "low" => Some("low"),
+                        "medium" | "high" | "xhigh" => Some("high"),
+                        "max" => Some("max"),
+                        _ => None, // on/未知档：不发 effort，官方默认 high
                     };
                     if let Some(e) = eff {
                         body["reasoning_effort"] = json!(e);

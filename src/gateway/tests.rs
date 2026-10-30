@@ -145,6 +145,40 @@
         assert!(b.get("stream_options").is_none());
     }
 
+    /// DeepSeek 思考档位映射（2026-10-31 依官方文档修正）：规范档只有
+    /// none/low/high/max；medium/xhigh/minimal 是官方兼容折算值，本地先折成
+    /// 规范档再发——此前把 max|xhigh 发成 "xhigh"、medium 原样外发都是错的。
+    #[test]
+    fn deepseek_effort_maps_to_canonical_low_high_max() {
+        let msgs = json!([{ "role": "user", "content": "hi" }]);
+        // REGISTRY 是进程级 OnceLock：测试进程里手动加载一次（幂等）
+        let _ = crate::gateway::providers::init(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("providers.json"));
+        let mut p = ChatParams::from_preset(crate::gateway::providers::find("deepseek").unwrap());
+        for (req, sent) in [
+            ("low", "low"),
+            ("minimal", "low"),
+            ("high", "high"),
+            ("medium", "high"),
+            ("xhigh", "high"),
+            ("max", "max"),
+        ] {
+            p.thinking = Some(req.into());
+            let b = build_body("deepseek-v4-flash", &msgs, true, &p, None);
+            assert_eq!(b["thinking"], json!({"type":"enabled"}), "请求档 {req}");
+            assert_eq!(b["reasoning_effort"], json!(sent), "请求档 {req} 应折算成官方规范档");
+        }
+        // on/未知档：thinking 开但不发 effort（官方默认 high）
+        p.thinking = Some("on".into());
+        let b = build_body("deepseek-v4-flash", &msgs, true, &p, None);
+        assert_eq!(b["thinking"], json!({"type":"enabled"}));
+        assert!(b.get("reasoning_effort").is_none());
+        // off：thinking disabled + effort none（官方双关形态，thinking 对象优先）
+        p.thinking = Some("off".into());
+        let b = build_body("deepseek-v4-flash", &msgs, true, &p, None);
+        assert_eq!(b["thinking"], json!({"type":"disabled"}));
+        assert_eq!(b["reasoning_effort"], json!("none"));
+    }
+
     // —— 用量台账：渠道标识与 usage 解析 ——
 
     #[test]
