@@ -6064,7 +6064,7 @@
             </div>
             {#if !msgSelectMode && !m.queued}
               <!-- 操作条在消息下方：时间贴行边、功能贴另一边；图标+tooltip，不占正文 -->
-              <div class="msg-meta">
+              <div class="msg-meta user-meta">
                 {#if m.ts}<span class="msg-ts">{fmtTs(m.ts)}</span>{/if}
                 <span class="msg-acts" on:click|stopPropagation>
                   <button class="msg-act" title="回滚：文件恢复到这条消息之前，并删掉这条和它之后的所有消息" aria-label="回滚" on:click|stopPropagation={() => rollbackMsg(m)}>
@@ -9890,6 +9890,15 @@
     width: 100%;
     min-height: 18px;
     margin-top: 2px;
+  }
+  /* 用户消息的时间贴着编辑操作组，放它们左边（用户 2026-10-30）；
+     助手消息保持时间在行左、详情在行右。 */
+  .msg-meta.user-meta {
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .msg-meta.user-meta .msg-acts {
+    margin-left: 0;
   }
   .msg-ts {
     font-size: 11px;
