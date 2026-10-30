@@ -9,6 +9,26 @@
   import ImagePreview from './lib/ImagePreview.svelte';
   // 助手消息 markdown 渲染（2026-10-04 用户拍板「星号太多」：escape-first 安全渲染）
   import { md } from './lib/md.js';
+  // 聊天展示层纯逻辑（2026-10-30 UI 轮）：分段/合并/工具人话化。
+  // 不碰 DOM，Node 单测见 web/test/chat.test.mjs（npm test / CI 门禁）。
+  import {
+    fmtDurCn,
+    appendThinking,
+    settleThinking,
+    appendContent,
+    addToolPart,
+    settleToolPart,
+    trimParts,
+    partsFromStoredMessage,
+    messageParts,
+    mergeAssistantRun,
+    attachToolPreview,
+    buildBlocks,
+    processSummary,
+    processIsLive,
+    toolMeta,
+    prettyArgs,
+  } from './lib/chat.js';
   import RenameModal from './lib/RenameModal.svelte';
   import ConfirmModal from './lib/ConfirmModal.svelte';
   import WorkspaceModal from './lib/WorkspaceModal.svelte';
@@ -1301,33 +1321,20 @@
   //      占位区并把矩形报给后端（壳里的 webview 摆到这块）；浏览器直开 5173 时
   //      仍是 screencast 帧流，两条路径由后端 state.mode + 是否在 Tauri 里共同决定。
   let webTabs = []; // { id, agent, title, url, loading, suspended, visible }
-  // 思考过程展开态（按消息 id 记；流式 patch 换对象不丢开合——原生 details 在重渲染下会闪回，用户反馈展开不了）
-  let thinkingOpenMap = {};
-  // —— 思考块与「工作中」计时（用户 2026-10-01）——
-  // 思考块固定高度 + 自动跟随：新分片贴底；滚轮往上滚 → 暂停跟随（出「回到底部」按钮）；
-  // 滚回最底 → 恢复跟随。时长两个口径：整轮「工作中/工作用时」（收尾冻结）与
-  // 「思考 · 持续了 N 秒」（reasoning 分片的时间差累加，间隔 >5s 的按 5s 计）。
-  let thinkFollowMap = {}; // 消息 id → 是否跟随（false 时显示「回到底部」）
-  let thinkBoxEls = {}; // 消息 id → 思考滚动容器（bind:this）
-  // 工具卡折叠（`${msgId}:${idx}` → true=收起）：轮收尾自动全收（用户 2026-10-02：
-  // 「跑完之后自动收起所有工具调用留下结尾语」），点卡片头可再展开；未定义时
-  // 默认「跑的时候展开、收尾后收起」。恢复的历史消息没有收尾钩子，天然走默认收起。
+  // —— 思考/工具：过程块的展开态（2026-10-30 排布重做）——
+  // 思考与工具按真实发生顺序合成「过程块」；点摘要行展开。流式期间默认展开，
+  // 收尾后默认收起（用户 2026-10-02：跑完只留结尾语）。
+  let processOpenMap = {}; // `${msgId}:${blockIndex}` → true=展开
+  // 思考框自动跟随：新分片贴底；滚轮往上滚 → 暂停跟随（出「回到底部」按钮）
+  let thinkFollowMap = {}; // `${msgId}:${blockIndex}:${itemIndex}` → 是否跟随
+  let thinkBoxEls = {}; // 同上 → 思考滚动容器（bind:this）
+  // 工具详情折叠（`${msgId}:${toolIndex}` → true=展开）：默认收起，点行展开参数/结果
   let toolFold = {};
-  function toolIsOpen(msgId, idx, streaming) {
-    const v = toolFold[`${msgId}:${idx}`];
-    return v !== undefined ? !v : !!streaming;
+  function toggleProcess(key, currentlyOpen) {
+    processOpenMap = { ...processOpenMap, [key]: !currentlyOpen };
   }
-  function toggleToolFold(msgId, idx, currentlyOpen) {
-    // 直接把「当前有效状态」写进折叠表：true=收起 / false=展开（模板传 open 进来，
-    // 别在函数里用 streaming 参数重算——显式展开过的卡会取反成同一个值，点不回去）
-    const k = `${msgId}:${idx}`;
-    toolFold = { ...toolFold, [k]: !!currentlyOpen };
-  }
-  function foldAllTools(m) {
-    if (!m || !m.tools || !m.tools.length) return;
-    const patch = {};
-    m.tools.forEach((_, i) => (patch[`${m.id}:${i}`] = true));
-    toolFold = { ...toolFold, ...patch };
+  function toggleToolDetail(msgId, idx, currentlyOpen) {
+    toolFold = { ...toolFold, [`${msgId}:${idx}`]: !currentlyOpen };
   }
   let nowTick = Date.now(); // 实时计时滴答（流式期间每秒更新）
   let tickTimer = null;
@@ -1337,30 +1344,24 @@
     clearInterval(tickTimer);
     tickTimer = null;
   }
-  /// 轮收尾：停表（工作用时冻结；还开着的思考阶段也关表累加），工具卡全收、留结尾语
+  /// 轮收尾：停表（工作用时冻结；还开着的思考阶段也关表累加），过程块默认收起、留结尾语
   function endTurn(m) {
-    foldAllTools(m);
     const closed = m.thinkPhaseStart ? Date.now() - m.thinkPhaseStart : 0;
     return {
       ...m,
       streaming: false,
+      parts: closed ? settleThinking(m.parts, closed) : m.parts,
       workMs: m.workMs || (m.workStartedAt ? Date.now() - m.workStartedAt : 0),
       thinkMs: (m.thinkMs || 0) + closed,
       thinkPhaseStart: 0,
     };
   }
-  /// 「3 分 47 秒」/「27 秒」；不到 1 秒显示 1 秒（别给 0 秒这种怪数字）
-  function fmtDurCn(ms) {
-    const s = Math.max(1, Math.round((ms || 0) / 1000));
-    if (s < 60) return `${s} 秒`;
-    const m = Math.floor(s / 60);
-    const r = s % 60;
-    return r ? `${m} 分 ${r} 秒` : `${m} 分`;
-  }
   /// 思考框自动跟随：内容增长时贴底；用户上滚 → 停（followchange 通知界面）；
-  /// 滚回最底 → 恢复
-  function thinkFollow(node) {
+  /// 滚回最底 → 恢复。只在流式思考（active=true）时启动——历史里展开一段长思考
+  /// 应该从顶部读起，不能一打开就跳到底。
+  function thinkFollow(node, active = true) {
     let following = true;
+    let live = !!active;
     const nearBottom = () => node.scrollHeight - node.scrollTop - node.clientHeight < 24;
     const onScroll = () => {
       const nf = nearBottom();
@@ -1370,21 +1371,69 @@
       }
     };
     const mo = new MutationObserver(() => {
-      if (following) node.scrollTop = node.scrollHeight;
+      if (live && following) node.scrollTop = node.scrollHeight;
     });
     node.addEventListener('scroll', onScroll, { passive: true });
     mo.observe(node, { childList: true, characterData: true, subtree: true });
-    node.scrollTop = node.scrollHeight;
+    if (live) node.scrollTop = node.scrollHeight;
     return {
+      update(next) {
+        live = !!next;
+        if (live) {
+          following = true;
+          node.scrollTop = node.scrollHeight;
+        }
+      },
       destroy() {
         node.removeEventListener('scroll', onScroll);
         mo.disconnect();
       },
     };
   }
-  function jumpThink(id) {
-    const el = thinkBoxEls[id];
+  function jumpThink(key) {
+    const el = thinkBoxEls[key];
     if (el) el.scrollTop = el.scrollHeight;
+  }
+  /// 复制到剪贴板：优先异步 Clipboard API，拒绝/不可用时退回 execCommand
+  /// （无头/权限被拒时前者会失败，不能让「复制」变摆设）
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try {
+        ok = document.execCommand('copy');
+      } catch {}
+      ta.remove();
+      return ok;
+    }
+  }
+  /// 回复正文的点击委托：代码块「复制」与站内文件引用（doc-cite）落预览标签。
+  async function onContentClick(e) {
+    const t = e.target instanceof HTMLElement ? e.target : null;
+    if (!t) return;
+    const copy = t.closest('button.md-copy');
+    if (copy) {
+      e.preventDefault();
+      const pre = copy.closest('.md-codeblock')?.querySelector('pre');
+      if (!pre) return;
+      const old = copy.textContent;
+      copy.textContent = (await copyText(pre.innerText)) ? '已复制' : '复制失败';
+      setTimeout(() => (copy.textContent = old || '复制'), 1200);
+      return;
+    }
+    const a = t.closest('a.doc-cite');
+    if (!a) return;
+    e.preventDefault();
+    const p = new URL(a.href, location.origin).searchParams.get('path');
+    if (p) openPreviewTab(p);
   }
   let webActiveId = '';
   let webAddress = '';
@@ -2900,13 +2949,13 @@
     if (opts.silentSteer) {
       updMsgs(key, (a) => [
         ...a.filter((m) => m.id !== opts.bubbleId),
-        { id: asstId, role: 'assistant', content: '', thinking: '', tools: [], streaming: true, workStartedAt: Date.now(), ts: Date.now() },
+        { id: asstId, role: 'assistant', content: '', thinking: '', tools: [], parts: [], streaming: true, workStartedAt: Date.now(), ts: Date.now() },
       ]);
     } else {
       updMsgs(key, (a) => [
         ...a.map((m) => (opts.bubbleId && m.id === opts.bubbleId ? { ...m, queued: false, steered: !!opts.steer, interrupted: !!opts.interrupt } : m)),
         ...(hasBubble ? [] : [{ id: nextId(), role: 'user', content: text, attachments: atts, convs, ts: Date.now() }]),
-        { id: asstId, role: 'assistant', content: '', thinking: '', tools: [], streaming: true, workStartedAt: Date.now(), ts: Date.now() },
+        { id: asstId, role: 'assistant', content: '', thinking: '', tools: [], parts: [], streaming: true, workStartedAt: Date.now(), ts: Date.now() },
       ]);
     }
     const ac = new AbortController();
@@ -2991,25 +3040,38 @@
                 }
                 const nid = nextId();
                 stream.asstId = nid;
-                updMsgs(skey, (a) => [...a, ...adds, { id: nid, role: 'assistant', content: '', thinking: '', tools: [], streaming: true, workStartedAt: Date.now(), ts: Date.now() }]);
+                updMsgs(skey, (a) => [...a, ...adds, { id: nid, role: 'assistant', content: '', thinking: '', tools: [], parts: [], streaming: true, workStartedAt: Date.now(), ts: Date.now() }]);
               } else if (d.content) {
                 // 正文 = 本段思考结束：把这段的跨度累进总时长并停表（实时数字不再走）。
                 // **不能清计时锚点 了事**——真渠道的思考常以少量大分片到达，按「分片间隔」
-                // 累加会得 0，时长就显示不出来（用户实锤）；按阶段跨度算才对
+                // 累加会得 0，时长就显示不出来（用户实锤）；按阶段跨度算才对。
+                // parts 同步追加：正文把前后的「过程块」隔开，按真实顺序渲染。
                 patch((m) => {
                   const closed = m.thinkPhaseStart ? Date.now() - m.thinkPhaseStart : 0;
-                  return { ...m, content: m.content + d.content, thinkMs: (m.thinkMs || 0) + closed, thinkPhaseStart: 0 };
+                  return {
+                    ...m,
+                    content: m.content + d.content,
+                    parts: appendContent(settleThinking(m.parts, closed), d.content),
+                    thinkMs: (m.thinkMs || 0) + closed,
+                    thinkPhaseStart: 0,
+                  };
                 });
               }
               // 思考分片：文字累积；首片开表（阶段跨度计时），多步任务里后续思考再开新表
               else if (d.reasoning)
-                patch((m) => ({ ...m, thinking: m.thinking + d.reasoning, thinkPhaseStart: m.thinkPhaseStart || Date.now() }));
+                patch((m) => ({
+                  ...m,
+                  thinking: m.thinking + d.reasoning,
+                  parts: appendThinking(m.parts, d.reasoning),
+                  thinkPhaseStart: m.thinkPhaseStart || Date.now(),
+                }));
               // 降级链换渠道重试：丢掉本步已推的半截内容（长度由服务端按 UTF-16 码元数给出）
               else if (d.reset)
                 patch((m) => ({
                   ...m,
                   content: m.content.slice(0, Math.max(0, m.content.length - (d.reset.content || 0))),
                   thinking: (m.thinking || '').slice(0, Math.max(0, (m.thinking || '').length - (d.reset.reasoning || 0))),
+                  parts: trimParts(trimParts(m.parts, 'content', d.reset.content || 0), 'thinking', d.reset.reasoning || 0),
                 }));
               else if (d.steer) {
                 // 引导/打断的消息并入了本轮。本页自己发过的（localSteers 按序配对）跳过——
@@ -3025,9 +3087,16 @@
               } else if (d.tool_call)
                 patch((m) => {
                   const closed = m.thinkPhaseStart ? Date.now() - m.thinkPhaseStart : 0;
+                  const toolIndex = (m.tools || []).length;
                   return {
                     ...m,
                     tools: [...(m.tools || []), { name: d.tool_call.name, args: d.tool_call.args, status: 'running' }],
+                    parts: addToolPart(settleThinking(m.parts, closed), {
+                      name: d.tool_call.name,
+                      args: d.tool_call.args,
+                      status: 'running',
+                      toolIndex,
+                    }),
                     thinkMs: (m.thinkMs || 0) + closed, // 调工具 = 本段思考结束，停表
                     thinkPhaseStart: 0,
                   };
@@ -3041,7 +3110,7 @@
                       break;
                     }
                   }
-                  return { ...m, tools };
+                  return { ...m, tools, parts: settleToolPart(m.parts, d.tool_result.name, d.tool_result.ok, d.tool_result.preview) };
                 });
               else if (d.approval_request)
                 patch((m) => ({
@@ -4067,6 +4136,14 @@
             status: 'ok',
             preview: '',
           })),
+          // 2026-10-30：按真实发生顺序的分段（思考 → 正文 → 工具）；多步再用
+          // mergeAssistantRun 合并。落盘结构不动，parts 只活在展示层。
+          parts: partsFromStoredMessage({
+            reasoning_content: m.reasoning_content,
+            reasoning_ms: m.reasoning_ms,
+            content: contentText(m.content),
+            tool_calls: m.tool_calls,
+          }),
           streaming: false,
           // 时长随消息落盘（服务端写）：整轮「工作用时」只在收尾消息上，中间步骤有「用时」
           workMs: m.work_ms || 0,
@@ -4085,43 +4162,19 @@
           (x) => x.role === 'assistant' && (x.tools || []).some((t) => t.id === m.tool_call_id)
         );
         const t = asst && asst.tools.find((t) => t.id === m.tool_call_id);
-        if (t) t.preview = contentText(m.content).slice(0, 300);
+        if (t) {
+          t.preview = contentText(m.content).slice(0, 300);
+          // 工具结果也回填到顺序分段的对应工具段（展示详情用）
+          asst.parts = attachToolPreview(asst.parts, m.tool_call_id, t.preview);
+        }
       }
     }
     return mergeAssistantRun(out);
   }
 
-  /// 同一轮里的连续 assistant 消息并成一个气泡——对齐流式渲染的形状。
-  ///
-  /// 流式路径是一轮**一个**气泡：turn 开始时建一个 streaming 气泡，这一步那一步的
-  /// tool_call 全往它的 tools 里追加，时间戳也只有一条。落盘却是**一步一条**
-  /// assistant（每步自带 tool_calls/stats），直接重建就得到 N 个气泡、N 条时间戳，
-  /// 工具调用全被隔开——用户实锤「重启前还好好的折叠在一起，重启后每个中间都插一个
-  /// 时间标记」（2026-10-30）。落盘结构不动（每步一条是正确的事实源），只在展示层合并。
-  ///
-  /// 合并规则：连续 assistant（中间没有 user/system 隔断）→ content/thinking 拼接、
-  /// tools 依序合并、thinkMs 累加；workMs/stats 取收尾消息那条（整轮用时与信息卡只在
-  /// 最后一条上）；ts 与 id 留**第一条**的——时间标记一个就够。
-  function mergeAssistantRun(list) {
-    const out = [];
-    for (const m of list) {
-      const prev = out[out.length - 1];
-      if (m.role === 'assistant' && prev && prev.role === 'assistant') {
-        out[out.length - 1] = {
-          ...prev,
-          content: (prev.content || '') + (m.content || ''),
-          thinking: (prev.thinking || '') + (m.thinking || ''),
-          tools: [...(prev.tools || []), ...(m.tools || [])],
-          thinkMs: (prev.thinkMs || 0) + (m.thinkMs || 0),
-          workMs: m.workMs || prev.workMs,
-          stats: m.stats || prev.stats,
-        };
-      } else {
-        out.push(m);
-      }
-    }
-    return out;
-  }
+  // 同一轮连续 assistant 合并 / 分段规则见 lib/chat.js 的 mergeAssistantRun：
+  // 流式路径一轮一个气泡，落盘一步一条 assistant；展示层合并，落盘结构不动
+  // （2026-10-30 实锤过「重启后工具调用被拆成 N 个气泡」）。规则有单测兜底。
 
   // 审批决定：本地乐观标记 + 通知后端（后端也会回 approval_decided，幂等）。
   // remember=true → 本会话内「同类操作」不再询问（A3）；后端拒绝记忆 Dangerous 档。
@@ -6043,44 +6096,14 @@
             <div class="msg-stack">
             <div class="bubble asst-bubble">
               {#if m.workStartedAt || m.workMs}
-                <div class="work-line">
+                <div class="turn-bar" class:live={m.streaming}>
                   {#if m.streaming && m.workStartedAt}
-                    工作中 {fmtDurCn(nowTick - m.workStartedAt)}
+                    <span class="live-dot"></span>
+                    <span>正在工作</span>
+                    <span class="turn-time">{fmtDurCn(nowTick - m.workStartedAt)}</span>
                   {:else if m.workMs}
-                    工作用时 {fmtDurCn(m.workMs)}
-                  {/if}
-                </div>
-              {/if}
-              {#if m.thinking}
-                {@const thinkingOpen = thinkingOpenMap[m.id] ?? false}
-                {@const liveThinkMs = m.thinkPhaseStart
-                  ? (m.thinkMs || 0) + (nowTick - m.thinkPhaseStart)
-                  : m.thinkMs || 0}
-                <div class="thinking">
-                  <button
-                    class="thinking-summary"
-                    on:click={() => (thinkingOpenMap = { ...thinkingOpenMap, [m.id]: !thinkingOpen })}
-                    title={thinkingOpen ? '收起思考过程' : '展开思考过程'}
-                  >
-                    <svg class="thinking-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.6a4.2 4.2 0 0 0-4.2 4.2c0 .9.3 1.7.8 2.4a3.6 3.6 0 0 0 1.4 6.5h4a3.6 3.6 0 0 0 1.4-6.5c.5-.7.8-1.5.8-2.4A4.2 4.2 0 0 0 12 4.6Z"/><path d="M10.6 20.4h2.8"/></svg>
-                    <span class="thinking-label">{liveThinkMs >= 1000 ? `思考 · 持续了 ${fmtDurCn(liveThinkMs)}` : '思考'}</span>
-                    <svg class="thinking-caret" class:open={thinkingOpen} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
-                  </button>
-                  {#if thinkingOpen}
-                    <div
-                      class="thinking-box"
-                      class:streaming={m.streaming}
-                      use:thinkFollow
-                      bind:this={thinkBoxEls[m.id]}
-                      on:followchange={(e) => (thinkFollowMap = { ...thinkFollowMap, [m.id]: e.detail.following })}
-                    >
-                      <div class="thinking-body">{m.thinking}</div>
-                      {#if thinkFollowMap[m.id] === false}
-                        <button class="think-jump" title="回到底部（继续跟随）" on:click={() => jumpThink(m.id)}>
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"/><path d="m6 12 6 6 6-6"/></svg>
-                        </button>
-                      {/if}
-                    </div>
+                    <svg class="turn-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+                    <span>已工作 {fmtDurCn(m.workMs)}</span>
                   {/if}
                 </div>
               {/if}
@@ -6114,44 +6137,100 @@
                   {/if}
                 </div>
               {/if}
-              {#if m.tools && m.tools.length}
-                {#each m.tools as t, ti}
-                  <!-- open 直接在模板里读 toolFold（Svelte 模板只对直接引用的变量做响应式，
-                       包进函数就收不到 toolFold 的变更——真机实锤过） -->
-                  {@const foldKey = `${m.id}:${ti}`}
-                  {@const open = toolFold[foldKey] !== undefined ? !toolFold[foldKey] : false}
-                  <div class="tool-card">
-                    <div
-                      class="tool-head"
-                      role="button"
-                      tabindex="-1"
-                      title={open ? '收起详情' : '展开详情'}
-                      on:click={() => toggleToolFold(m.id, ti, open)}
+              <!-- 过程（思考 + 工具）与正文按真实发生顺序渲染：连续的过程合成一个可展开块，
+                   正文把前后过程隔开。多步任务就是「过程 → 说明 → 过程 → 最终回答」。
+                   流式期间过程默认展开；收尾后默认收起，只留总结与结尾语（用户 2026-10-02）。 -->
+              {#each buildBlocks(messageParts(m)) as b, bi}
+                {@const pk = `${m.id}:${bi}`}
+                {@const open = processOpenMap[pk] !== undefined ? processOpenMap[pk] : !!m.streaming}
+                {#if b.kind === 'process'}
+                  <div class="process" class:live={m.streaming}>
+                    <button
+                      class="process-head"
+                      on:click={() => toggleProcess(pk, open)}
+                      title={open ? '收起过程' : '展开思考与工具调用'}
                     >
-                      <span class="tool-badge {t.status}">{t.status === 'running' ? '执行中' : t.status === 'ok' ? '完成' : '失败'}</span>
-                      <span class="tool-name">{t.name}</span>
-                      <span class="tool-args" title={t.args}>{t.args}</span>
-                      <svg class="tool-caret" class:open={open} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
-                    </div>
-                    {#if t.preview && open}
-                      <pre class="tool-preview">{t.preview}</pre>
+                      <svg class="process-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 13.7 9l5.5 1.7-5.5 1.7L12 18l-1.7-5.6L4.8 10.7 10.3 9 12 3.5Z"/><path d="m19 15.5.7 2.2 2.3.8-2.3.8-.7 2.2"/></svg>
+                      <span class="process-title">{processSummary(b.items)}</span>
+                      {#if processIsLive(b.items)}<span class="process-live"><span class="live-dot"></span></span>{/if}
+                      <svg class="process-caret" class:open={open} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                    </button>
+                    {#if open}
+                      <div class="process-body">
+                        {#each b.items as it, ii}
+                          {@const ik = `${pk}:${ii}`}
+                          {#if it.type === 'thinking'}
+                            <div class="think-item">
+                              <div class="think-label">
+                                <span>{it.ms ? `思考 ${fmtDurCn(it.ms)}` : '思考'}</span>
+                                {#if m.streaming && !it.done}<span class="think-live">进行中</span>{/if}
+                              </div>
+                              <div
+                                class="think-text"
+                                class:streaming={m.streaming && !it.done}
+                                use:thinkFollow={m.streaming && !it.done}
+                                bind:this={thinkBoxEls[ik]}
+                                on:followchange={(e) => (thinkFollowMap = { ...thinkFollowMap, [ik]: e.detail.following })}
+                              >{it.text}</div>
+                              {#if thinkFollowMap[ik] === false}
+                                <button class="think-jump" title="回到底部（继续跟随）" on:click={() => jumpThink(ik)}>
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"/><path d="m6 12 6 6 6-6"/></svg>
+                                </button>
+                              {/if}
+                            </div>
+                          {:else if it.type === 'tool'}
+                            {@const tm = toolMeta(it.name, it.args)}
+                            <!-- 直接读 toolFold（Svelte 只对模板里直接引用的变量建依赖；
+                                 包进函数读不到变更——2026-10-26 真机实锤过同款坑） -->
+                            {@const tOpen = toolFold[`${m.id}:${it.toolIndex}`] === true}
+                            <div class="tool-item">
+                              <button
+                                class="tool-row"
+                                on:click={() => toggleToolDetail(m.id, it.toolIndex, tOpen)}
+                                title={tOpen ? '收起详情' : '展开参数与结果'}
+                              >
+                                <span class="tool-ico" class:running={it.status === 'running'}>{@html tm.iconSvg}</span>
+                                <span class="tool-name">{tm.label}</span>
+                                {#if tm.subject}<span class="tool-subject" title={tm.subject}>{tm.subject}</span>{/if}
+                                <span class="tool-status {it.status}">
+                                  {#if it.status === 'running'}<span class="tool-spin"></span>
+                                  {:else if it.status === 'ok'}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>
+                                  {:else}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+                                  {/if}
+                                </span>
+                                <svg class="tool-caret" class:open={tOpen} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+                              </button>
+                              {#if tOpen}
+                                <div class="tool-detail">
+                                  {#if it.args}
+                                    <div class="tool-sec">
+                                      <div class="tool-sec-label">参数</div>
+                                      <pre class="tool-pre">{prettyArgs(it.args)}</pre>
+                                    </div>
+                                  {/if}
+                                  {#if it.preview}
+                                    <div class="tool-sec">
+                                      <div class="tool-sec-label">结果</div>
+                                      <pre class="tool-pre">{it.preview}</pre>
+                                    </div>
+                                  {/if}
+                                  {#if !it.preview && it.status === 'running'}<div class="tool-wait">执行中…</div>{/if}
+                                </div>
+                              {/if}
+                            </div>
+                          {/if}
+                        {/each}
+                      </div>
                     {/if}
                   </div>
-                {/each}
-              {/if}
-              {#if m.content}
-                <!-- doc-cite：agent 回复里 /api/workspace/... 的文件引用，点击落到右侧预览标签 -->
-                <div class="content" on:click={(e) => {
-                  const a = e.target instanceof HTMLElement ? e.target.closest('a.doc-cite') : null;
-                  if (!a) return;
-                  e.preventDefault();
-                  const p = new URL(a.href, location.origin).searchParams.get('path');
-                  if (p) openPreviewTab(p);
-                }}>{@html md(m.content)}</div>
-              {:else if m.streaming}
+                {:else if b.text}
+                  <!-- doc-cite：agent 回复里 /api/workspace/... 的文件引用，点击落到右侧预览标签 -->
+                  <div class="content" on:click={onContentClick}>{@html md(b.text)}</div>
+                {/if}
+              {/each}
+              {#if m.streaming && !messageParts(m).length}
                 <div class="typing"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
               {/if}
-              {#if m.streaming && m.content}<span class="cursor"></span>{/if}
             </div>
             {#if m.ts || (m.stats && !m.streaming)}
             <div class="msg-meta">
@@ -7573,7 +7652,7 @@
     border-bottom-color: color-mix(in srgb, var(--g4) 30%, transparent);
   }
   /* 消息流内的深色面全部转半透明：88% 实色在壁纸上就是一块黑，用户 CSS 想盖也因为
-     规则分散（.tool-card/.cp-bar/...）而显得"去不掉"，这里统一收口 */
+     规则分散（.process/.cp-bar/...）而显得"去不掉"，这里统一收口 */
   :global(body.has-wallpaper) .asst-bubble {
     background: color-mix(in srgb, var(--g1) 72%, transparent);
     border-color: color-mix(in srgb, var(--g2) 50%, transparent);
@@ -7581,9 +7660,9 @@
   :global(body.has-wallpaper) .composer {
     background: color-mix(in srgb, var(--g2) 72%, transparent);
   }
-  :global(body.has-wallpaper) .tool-card,
-  :global(body.has-wallpaper) .tool-preview,
-  :global(body.has-wallpaper) .thinking-body,
+  :global(body.has-wallpaper) .process,
+  :global(body.has-wallpaper) .tool-detail,
+  :global(body.has-wallpaper) .tool-pre,
   :global(body.has-wallpaper) .approval-box,
   :global(body.has-wallpaper) .ctx-card {
     background: color-mix(in srgb, var(--g1) 66%, transparent);
@@ -9489,18 +9568,10 @@
       opacity: 1;
     }
   }
-  .cursor {
-    display: inline-block;
-    width: 2px;
-    height: 1em;
-    background: var(--g6);
-    vertical-align: -2px;
-    animation: blink 1s step-start infinite;
-  }
   .msg {
     display: flex;
     width: 100%;
-    max-width: 880px;
+    max-width: 820px;
     margin: 0 auto;
     padding: 0 24px;
     box-sizing: border-box;
@@ -9597,8 +9668,8 @@
     max-width: 78%;
     padding: 10px 14px;
     border-radius: 12px;
-    font-size: 14px;
-    line-height: 1.65;
+    font-size: 14.5px;
+    line-height: 1.7;
     word-break: break-word;
   }
   .user-text,
@@ -9606,76 +9677,143 @@
     /* markdown 渲染（2026-10-04）：结构标签自带节奏，不再 pre-wrap 平铺 */
     word-break: break-word;
   }
-  .content .md-p {
-    margin: 0 0 8px;
+  /* 用户消息是纯文本：换行/连续空格要保留（assistant 的 .content 是 markdown，不加） */
+  .user-text {
+    white-space: pre-wrap;
+    line-height: 1.7;
   }
-  .content .md-p:last-child {
+  /* 2026-10-30 排版重做：正文是主角——15px/1.78 的阅读节奏，标题/列表/代码块
+     各自有清晰层级，不再是一坨同灰度小字。 */
+  .content {
+    font-size: 14.5px;
+    line-height: 1.78;
+    color: var(--g7);
+  }
+  /* ⚠️ markdown 是 {@html} 运行时生成的，元素上没有 Svelte 作用域类：
+     所有 md-* 选择器必须用 :global()，否则会被编译器当「未使用选择器」整段裁掉
+     （2026-10-30 实锤：md 样式在构建产物里一条都没有，代码块/表格一直吃浏览器默认样式）。 */
+  .content > :first-child {
+    margin-top: 0;
+  }
+  .content :global(.md-p) {
+    margin: 0 0 10px;
+  }
+  .content :global(.md-p:last-child) {
     margin-bottom: 0;
   }
-  .content .md-h {
-    margin: 12px 0 6px;
-    font-size: 14px;
-    font-weight: 600;
+  .content :global(.md-h) {
+    margin: 20px 0 8px;
+    font-size: 15.5px;
+    font-weight: 650;
+    line-height: 1.45;
+    letter-spacing: 0.01em;
   }
-  .content .md-ul,
-  .content .md-ol {
-    margin: 4px 0 8px;
-    padding-left: 20px;
+  .content :global(.md-h:first-child) {
+    margin-top: 0;
   }
-  .content .md-li,
-  .content li {
-    margin: 2px 0;
+  .content :global(.md-ul),
+  .content :global(.md-ol) {
+    margin: 6px 0 12px;
+    padding-left: 22px;
   }
-  .content .md-code {
+  .content :global(.md-li),
+  .content :global(li) {
+    margin: 4px 0;
+  }
+  .content :global(.md-code) {
     background: var(--g2);
-    border-radius: 4px;
+    border: 1px solid color-mix(in srgb, var(--g3) 70%, transparent);
+    border-radius: 5px;
     padding: 1px 5px;
-    font: 12px/1.5 Consolas, 'Cascadia Code', monospace;
+    font: 12.5px/1.5 Consolas, 'Cascadia Code', monospace;
+    color: var(--g7);
   }
-  .content .md-pre {
+  /* 代码块：独立卡片 + 语言标签 + 复制按钮（md.js 生成结构，点击委托在 onContentClick） */
+  .content :global(.md-codeblock) {
+    margin: 10px 0 14px;
+    border: 1px solid var(--g2);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--g0);
+  }
+  .content :global(.md-codehead) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 8px 5px 12px;
     background: var(--g1);
-    border: 1px solid var(--g3);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin: 6px 0 10px;
-    overflow-x: auto;
+    border-bottom: 1px solid var(--g2);
   }
-  .content .md-table {
+  .content :global(.md-codelang) {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--g5);
+  }
+  .content :global(.md-copy) {
+    border: none;
+    background: transparent;
+    color: var(--g5);
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .content :global(.md-copy:hover) {
+    background: var(--g2);
+    color: var(--g7);
+  }
+  .content :global(.md-pre) {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 12px 14px;
+    margin: 0;
+    overflow: auto;
+    max-height: 520px;
+  }
+  .content :global(.md-table) {
     border-collapse: collapse;
-    margin: 6px 0 10px;
+    margin: 8px 0 14px;
     font-size: 13px;
     display: block;
     overflow-x: auto;
     white-space: normal;
   }
-  .content .md-table th,
-  .content .md-table td {
-    border: 1px solid var(--g3);
-    padding: 5px 10px;
+  .content :global(.md-table th),
+  .content :global(.md-table td) {
+    border: 1px solid var(--g2);
+    padding: 7px 12px;
     text-align: left;
     vertical-align: top;
   }
-  .content .md-table th {
-    background: var(--g1);
+  .content :global(.md-table th) {
+    background: var(--g2);
+    font-weight: 600;
   }
-  .content .md-pre code {
-    font: 12px/1.55 Consolas, 'Cascadia Code', monospace;
+  .content :global(.md-pre code) {
+    font: 12.5px/1.7 Consolas, 'Cascadia Code', monospace;
     white-space: pre;
   }
-  .content .md-quote {
-    margin: 6px 0;
-    padding: 2px 12px;
-    border-left: 3px solid var(--g3);
-    color: var(--g5);
-  }
-  .content .md-hr {
-    border: none;
-    border-top: 1px solid var(--g3);
+  .content :global(.md-quote) {
     margin: 10px 0;
+    padding: 2px 14px;
+    border-left: 2px solid var(--g4);
+    color: var(--g6);
   }
-  .content .md-a {
-    color: var(--accent, #7c9ff5);
-    text-decoration: underline;
+  .content :global(.md-hr) {
+    border: none;
+    border-top: 1px solid var(--g2);
+    margin: 16px 0;
+  }
+  .content :global(.md-a) {
+    color: var(--brand);
+    text-decoration: none;
+    border-bottom: 1px solid color-mix(in srgb, var(--brand) 45%, transparent);
+  }
+  .content :global(.md-a:hover) {
+    border-bottom-color: var(--brand);
   }
   /* 用户消息不再画气泡（用户 2026-10-01：去掉气泡，纯文本）；
      模型回复也没有边框底色，工具/审批/思考块自己带边框即可 */
@@ -9725,7 +9863,7 @@
   }
   .msg-ts {
     font-size: 11px;
-    color: var(--g4);
+    color: var(--g5);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -9734,7 +9872,7 @@
     align-items: center;
     gap: 1px;
     margin-left: auto; /* 没有时间戳时也贴右边（回答详情的右下角） */
-    opacity: 0.35;
+    opacity: 0.5;
     transition: opacity 0.12s;
   }
   .msg:hover .msg-acts,
@@ -9861,76 +9999,146 @@
     font-size: 12px;
     color: var(--g5);
   }
-  /* —— 思考块：固定高度 + 自动跟随 + 「思考 · 持续了 N 秒」 —— */
-  .work-line {
-    font-size: 12px;
-    color: var(--g5);
-    margin-bottom: 6px;
-    font-variant-numeric: tabular-nums;
-  }
-  .thinking {
-    margin-bottom: 8px;
-  }
-  .thinking-summary {
+  /* —— 一轮的元信息与过程块（2026-10-30 排布重做）——
+     思考/工具不再各占一堆卡片：按真实顺序合成「过程」，完成收成一行摘要。 */
+  .turn-bar {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 0;
-    border: none;
-    background: none;
-    cursor: pointer;
-    font-size: 12px;
-    color: var(--g6);
-    user-select: none;
-    font-family: inherit;
+    margin: 0 0 8px;
+    font-size: 11.5px;
+    color: var(--g5);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
   }
-  .thinking-summary:hover {
+  .turn-bar.live {
+    color: var(--g6);
+  }
+  .turn-clock {
+    width: 12px;
+    height: 12px;
+    flex: none;
+  }
+  .turn-time {
+    color: var(--g5);
+  }
+  .live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--brand);
+    flex: none;
+    animation: live-pulse 1.6s ease-out infinite;
+  }
+  @keyframes live-pulse {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 55%, transparent);
+    }
+    70% {
+      box-shadow: 0 0 0 6px color-mix(in srgb, var(--brand) 0%, transparent);
+    }
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 0%, transparent);
+    }
+  }
+  .process {
+    margin: 8px 0 12px;
+    border: 1px solid var(--g2);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--g2) 52%, transparent);
+    overflow: hidden;
+  }
+  .process.live {
+    border-color: color-mix(in srgb, var(--brand) 22%, var(--g2));
+  }
+  .process-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    background: transparent;
+    color: var(--g6);
+    font-size: 12.5px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+  }
+  .process-head:hover {
+    background: color-mix(in srgb, var(--g3) 45%, transparent);
     color: var(--g7);
   }
-  .thinking-ico {
-    width: 13px;
-    height: 13px;
+  .process-ico {
+    width: 14px;
+    height: 14px;
     flex: none;
-    opacity: 0.85;
+    color: var(--g5);
   }
-  .thinking-label {
+  .process-title {
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .thinking-caret {
-    width: 11px;
-    height: 11px;
+  .process-live {
+    display: inline-flex;
+    margin-left: 2px;
+  }
+  .process-caret {
+    width: 12px;
+    height: 12px;
     flex: none;
+    margin-left: auto;
+    color: var(--g5);
     transition: transform 0.15s;
   }
-  .thinking-caret.open {
-    transform: rotate(90deg);
+  .process-caret.open {
+    transform: rotate(180deg);
   }
-  /* 流式期间封顶 240px（不随吐字跳变），读完后按内容自适应、超长封顶 340。
-     开始没多少字时框就是内容高度——攒到一定量才固定并开始滚动（用户 2026-10-01） */
-  .thinking-box {
+  .process-body {
+    padding: 0 10px 8px;
+  }
+  .think-item {
     position: relative;
-    margin-top: 6px;
-    background: var(--g1);
-    border: 1px solid var(--g3);
-    border-radius: 8px;
-    overflow-y: auto;
-    max-height: 340px;
+    padding: 4px 2px 8px;
   }
-  .thinking-box.streaming {
-    max-height: 240px;
+  .think-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-bottom: 3px;
+    font-size: 11.5px;
+    color: var(--g5);
   }
-  .thinking-body {
-    padding: 8px 10px 14px;
+  .think-live {
+    padding: 0 5px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--brand) 12%, transparent);
+    color: var(--brand);
+    font-size: 10.5px;
+  }
+  /* 流式期间封顶 240px（不随吐字跳变）；读完后超长封顶 280。
+     开始没多少字时就是内容高度——攒到一定量才固定并滚动（用户 2026-10-01） */
+  .think-text {
+    padding: 1px 0 2px 12px;
+    border-left: 2px solid var(--g3);
     font-size: 13px;
+    line-height: 1.7;
     color: var(--g6);
     white-space: pre-wrap;
     word-break: break-word;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+  .think-text.streaming {
+    max-height: 240px;
   }
   .think-jump {
-    position: sticky;
-    bottom: 8px;
-    left: 50%;
-    transform: translateX(-50%);
+    position: absolute;
+    right: 8px;
+    bottom: 12px;
     display: grid;
     place-items: center;
     width: 24px;
@@ -9941,7 +10149,7 @@
     background: var(--g2);
     color: var(--g7);
     cursor: pointer;
-    box-shadow: 0 4px 12px rgb(0 0 0 / 35%);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 28%);
   }
   .think-jump svg {
     width: 13px;
@@ -9950,13 +10158,138 @@
   .think-jump:hover {
     background: var(--g3);
   }
-  .tool-card {
-    margin-bottom: 8px;
-    background: var(--g1);
-    border: 1px solid var(--g2);
-    border-left: 2px solid var(--g4);
-    border-radius: 10px;
+  /* —— 工具行：一行一个动作，点开才是参数/结果 —— */
+  .tool-item {
+    border-radius: 7px;
+  }
+  .tool-item:hover {
+    background: color-mix(in srgb, var(--g3) 30%, transparent);
+  }
+  .tool-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 5px 5px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 7px;
+  }
+  .tool-row:hover {
+    background: color-mix(in srgb, var(--g3) 34%, transparent);
+  }
+  .tool-ico {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    flex: none;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--g1) 80%, transparent);
+    border: 1px solid color-mix(in srgb, var(--g3) 60%, transparent);
+    color: var(--g5);
+  }
+  .tool-ico svg {
+    width: 13px;
+    height: 13px;
+  }
+  .tool-ico.running {
+    color: var(--brand);
+  }
+  .tool-name {
+    flex: none;
+    font-size: 12.5px;
+    font-weight: 550;
+    color: var(--g7);
+  }
+  .tool-subject {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--g5);
+    font-family: Consolas, 'Cascadia Code', monospace;
+  }
+  .tool-status {
+    display: grid;
+    place-items: center;
+    width: 15px;
+    height: 15px;
+    flex: none;
+    margin-left: auto;
+    color: var(--g5);
+  }
+  .tool-status svg {
+    width: 13px;
+    height: 13px;
+  }
+  .tool-status.ok {
+    color: var(--tint-green-fg);
+    opacity: 0.85;
+  }
+  .tool-status.fail {
+    color: var(--tint-red-fg);
+  }
+  .tool-spin {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 1.6px solid var(--g4);
+    border-top-color: var(--brand);
+    animation: tool-spin 0.8s linear infinite;
+  }
+  @keyframes tool-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .tool-caret {
+    width: 12px;
+    height: 12px;
+    flex: none;
+    color: var(--g5);
+    transition: transform 0.15s;
+  }
+  .tool-caret.open {
+    transform: rotate(90deg);
+  }
+  .tool-detail {
+    margin: 2px 4px 8px 34px;
     padding: 8px 10px;
+    border: 1px solid var(--g2);
+    border-radius: 8px;
+    background: var(--g1);
+  }
+  .tool-sec + .tool-sec {
+    margin-top: 8px;
+  }
+  .tool-sec-label {
+    margin-bottom: 3px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    color: var(--g5);
+  }
+  .tool-pre {
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--g0);
+    color: var(--g6);
+    font: 12px/1.6 Consolas, 'Cascadia Code', monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 200px;
+    overflow: auto;
+  }
+  .tool-wait {
+    font-size: 11.5px;
+    color: var(--g5);
   }
   .approval-box {
     margin-bottom: 8px;
@@ -10535,64 +10868,13 @@
   .rv-menu button:hover {
     background: var(--g2);
   }
-  .tool-head {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    font-size: 12px;
-    cursor: pointer;
-    user-select: none;
-  }
-  .tool-caret {
-    flex: none;
-    width: 13px;
-    height: 13px;
-    margin-left: auto;
-    color: var(--g5);
-    transition: transform 0.12s;
-    transform: rotate(0deg);
-  }
-  .tool-caret.open {
-    transform: rotate(90deg);
-  }
-  .tool-badge {
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: 11px;
-  }
-  .tool-badge.running {
-    background: var(--g3);
-    color: var(--tint-blue-fg);
-  }
-  .tool-badge.ok {
-    background: var(--tint-green-bg);
-    color: var(--tint-green-fg);
-  }
-  .tool-badge.fail {
-    background: var(--tint-red-bg);
-    color: var(--tint-red-fg);
-  }
-  .tool-name {
-    font-family: Consolas, monospace;
-    color: var(--tint-blue-fg);
-  }
-  .tool-args {
+  /* 审批卡里仍要显示原始工具参数（工具调用行已改成人话摘要） */
+  .approval-box .tool-args {
     color: var(--g5);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 320px;
-  }
-  .tool-preview {
-    margin: 6px 0 0;
-    padding: 6px 8px;
-    background: var(--g1);
-    border-radius: 6px;
-    font-size: 12px;
-    color: var(--g6);
-    white-space: pre-wrap;
-    max-height: 160px;
-    overflow-y: auto;
   }
   /* —— 子代理（2026-10-20 第 2 轮；主区实时条 + 居中小弹窗，不落侧边栏）—— */
   .subagent-strip {
@@ -10868,14 +11150,6 @@
     background: var(--g2);
     border-radius: 5px;
     word-break: break-all;
-  }
-  .cursor {
-    animation: blink 1s step-start infinite;
-  }
-  @keyframes blink {
-    50% {
-      opacity: 0;
-    }
   }
   .typing {
     color: var(--g6);

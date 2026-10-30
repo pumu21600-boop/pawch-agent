@@ -12,9 +12,15 @@ export function md(src) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
   // 2) 围栏代码块（先把代码内容抠出来占位，别被后面的行内规则误伤）
+  //    2026-10-30：加代码块头（语言 + 复制按钮）；复制走 content 上的事件委托。
   const blocks = [];
   t = t.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-    blocks.push(`<pre class="md-pre"><code>${code.replace(/\n$/, '')}</code></pre>`);
+    const label = (lang || 'text').toLowerCase();
+    blocks.push(
+      `<div class="md-codeblock"><div class="md-codehead"><span class="md-codelang">${label}</span>` +
+        `<button class="md-copy" type="button" title="复制代码">复制</button></div>` +
+        `<pre class="md-pre"><code>${code.replace(/\n$/, '')}</code></pre></div>`
+    );
     return `\u0000${blocks.length - 1}\u0000`;
   });
   // 3) 行内代码（同样占位）
@@ -68,9 +74,10 @@ export function md(src) {
     return `<blockquote class="md-quote">${lines}</blockquote>`;
   });
   // 11) 段落与换行：双换行分段，单换行转 <br>
+  //     占位符（代码块）不能被包进 <p>——否则还原后是 <p><div class="md-codeblock">… 的非法嵌套
   t = t
     .split(/\n{2,}/)
-    .map((p) => (p.trim() && !/^<(h[1-6]|ul|ol|pre|hr|blockquote|div|table)\b/i.test(p.trim()) ? `<p class="md-p">${p.trim()}</p>` : p.trim()))
+    .map((p) => (p.trim() && !/^<(h[1-6]|ul|ol|pre|hr|blockquote|div|table)\b/i.test(p.trim()) && !/^\u0000\d+\u0000/.test(p.trim()) ? `<p class="md-p">${p.trim()}</p>` : p.trim()))
     .join('');
   t = t.replace(/\n/g, '<br />');
   // 12) 还原占位
