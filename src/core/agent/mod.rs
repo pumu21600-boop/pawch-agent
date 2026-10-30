@@ -1134,6 +1134,26 @@ pub async fn run_task(
 mod tests {
     use super::*;
 
+    /// 2026-10-30 真机实锤：模型一次吐 50KB 的 write_file，输出打满 max_tokens 被切断，
+    /// 参数是没闭合的 JSON。体检必须认出「截断」并给分块指引，而不是 serde 天书。
+    #[test]
+    fn tool_args_guard_detects_truncation_and_guides_chunking() {
+        // 合法 JSON / 空参数 → 放行
+        assert!(tool_args_guard("write_file", r#"{"path":"a.txt","content":"hi"}"#).is_none());
+        assert!(tool_args_guard("list_skills", "").is_none(), "空参数放行，让工具自己按原行为报");
+        // 截断：字符串没闭合（serde: EOF while parsing a string）
+        let mut truncated = String::from(r#"{"path":"a.html","content":"<!DOCTYPE html>"#);
+        truncated.push_str(&"x".repeat(500));
+        let msg = tool_args_guard("write_file", &truncated).expect("截断必须拦下来");
+        assert!(msg.contains("被截断"), "要说是截断: {msg}");
+        assert!(msg.contains("分块"), "要给分块指引: {msg}");
+        assert!(msg.contains("edit_file"), "要指路续写工具: {msg}");
+        // 其他非法 JSON → 也给人话，但不冒充截断
+        let bad = tool_args_guard("write_file", "not json at all").expect("非法 JSON 也要拦");
+        assert!(bad.contains("不是合法 JSON"), "{bad}");
+        assert!(!bad.contains("被截断"), "语法错误不该说成截断: {bad}");
+    }
+
     #[test]
     fn tools_def_follows_capability_mark() {
         // A3（施工单 012）：capabilities.tools=false → 请求不携带 tools 参数
