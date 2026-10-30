@@ -12,6 +12,7 @@ import {
   buildBlocks,
   buildCompletedView,
   buildMessageBlocks,
+  completedHasProcess,
   isNoiseThinking,
   processSummary,
   processIsLive,
@@ -137,6 +138,24 @@ test('buildCompletedView：完成后只留最后一段结语，执行过程全�
   ]);
   // 流式入口仍按真实顺序展开
   assert.equal(buildMessageBlocks(parts, true).filter((b) => b.kind === 'process').length, 2);
+});
+
+test('completedHasProcess：有无过程块决定「已工作」显示位置（纯问答轮不丢时长）', () => {
+  // 纯问答：无过程块 → 「已工作」单独显示在顶部条
+  assert.equal(completedHasProcess([{ type: 'content', text: '答案' }]), false);
+  // 纯标点思考撑不出过程块 → 仍是顶部条
+  assert.equal(
+    completedHasProcess([{ type: 'thinking', text: '.' }, { type: 'content', text: '答案' }]),
+    false
+  );
+  // 有思考/工具 → 时长并进过程行，顶部不再单独显示
+  assert.equal(
+    completedHasProcess([
+      { type: 'thinking', text: '想', ms: 61000, done: true },
+      { type: 'content', text: '答案' },
+    ]),
+    true
+  );
 });
 
 test('processSummary：已工作/思考时长 + 工具数；没有过程时给兜底文案', () => {

@@ -24,6 +24,7 @@
     mergeAssistantRun,
     attachToolPreview,
     buildMessageBlocks,
+    completedHasProcess,
     processSummary,
     processIsLive,
     toolMeta,
@@ -1329,7 +1330,7 @@
   //      仍是 screencast 帧流，两条路径由后端 state.mode + 是否在 Tauri 里共同决定。
   let webTabs = []; // { id, agent, title, url, loading, suspended, visible }
   // —— 思考/工具：过程块的展开态（2026-10-30 排布重做）——
-  // 思考与工具按真实发生顺序合成「过程块」；点摘要行展开。流式期间默认展开，
+  // 思考与工具按真实发生顺序合成「过程块」；点过程行展开。流式期间默认展开，
   // 收尾后默认收起（用户 2026-10-02：跑完只留结尾语）。
   let processOpenMap = {}; // `${msgId}:${blockIndex}` → true=展开
   // 单段思考的展开态：流式中默认展开，思考一结束（done）默认自动折叠；
@@ -6114,6 +6115,12 @@
                   <span>正在工作</span>
                   <span class="turn-time">{fmtDurCn(nowTick - m.workStartedAt)}</span>
                 </div>
+              {:else if m.workMs && !completedHasProcess(messageParts(m))}
+                <!-- 纯问答轮（无思考/无工具）：与过程块同一行样式，只是没有过程可展开 -->
+                <div class="process-head static">
+                  <svg class="process-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 13.7 9l5.5 1.7-5.5 1.7L12 18l-1.7-5.6L4.8 10.7 10.3 9 12 3.5Z"/><path d="m19 15.5.7 2.2 2.3.8-2.3.8-.7 2.2"/></svg>
+                  <span class="process-title">{processSummary([], m.workMs)}</span>
+                </div>
               {/if}
               {#if m.approval}
                 <div class="approval-box" class:danger={m.approval.risk >= 2}>
@@ -10086,7 +10093,7 @@
     color: var(--g5);
   }
   /* —— 一轮的元信息与过程块（2026-10-30 排布重做）——
-     思考/工具不再各占一堆卡片：按真实顺序合成「过程」，完成收成一行摘要。 */
+     思考/工具不再各占一堆卡片：按真实顺序合成「过程」，完成收成一行。 */
   .turn-bar {
     display: flex;
     align-items: center;
@@ -10150,6 +10157,15 @@
   .process-head:hover {
     background: color-mix(in srgb, var(--g3) 45%, transparent);
     color: var(--g7);
+  }
+  /* 纯问答轮的同行样式（无过程可展开）：长得和过程行一样，只是不可点、无悬停反馈 */
+  .process-head.static {
+    cursor: default;
+    user-select: text;
+  }
+  .process-head.static:hover {
+    background: transparent;
+    color: var(--g6);
   }
   .process-ico {
     width: 14px;
@@ -10982,7 +10998,7 @@
   .rv-menu button:hover {
     background: var(--g2);
   }
-  /* 审批卡里仍要显示原始工具参数（工具调用行已改成人话摘要） */
+  /* 审批卡里仍要显示原始工具参数（工具调用行已改成人话说明） */
   .approval-box .tool-args {
     color: var(--g5);
     overflow: hidden;

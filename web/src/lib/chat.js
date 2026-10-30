@@ -259,6 +259,13 @@ export function buildMessageBlocks(parts, streaming) {
   return streaming ? buildBlocks(parts) : buildCompletedView(parts);
 }
 
+/// 完成态有没有「过程」折叠块——决定「已工作」时长显示在哪：
+/// 有过程块时并进这一行（2026-10-30 定稿）；纯问答轮（无思考/无工具）没有
+/// 过程块，就单独显示同样的行（不可展开），时长不能凭空消失（2026-10-31 用户实锤）。
+export function completedHasProcess(parts) {
+  return buildCompletedView(parts).some((b) => b.kind === 'process');
+}
+
 /// 过程块是否还在跑：有执行中的工具，或还有没结算的思考段。
 /// 只给「当前这一块」打活点——同一轮里已完成的旧过程块不该继续闪。
 export function processIsLive(items) {
@@ -267,7 +274,7 @@ export function processIsLive(items) {
   );
 }
 
-/// 过程块的摘要：「已工作 13 分 42 秒 · 思考 6 分 27 秒 · 9 个工具」
+/// 过程块的一行说明：「已工作 13 分 42 秒 · 思考 6 分 27 秒 · 9 个工具」
 /// workMs 只在完成态传入（把顶部的「已工作」并进这一行，少一行噪音）。
 export function processSummary(items, workMs = 0) {
   const list = items || [];
