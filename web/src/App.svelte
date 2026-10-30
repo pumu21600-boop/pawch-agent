@@ -23,7 +23,7 @@
     messageParts,
     mergeAssistantRun,
     attachToolPreview,
-    buildBlocks,
+    buildMessageBlocks,
     processSummary,
     processIsLive,
     toolMeta,
@@ -150,6 +150,13 @@
   // 「已引导」静默标记（2026-10-22 用户定案：引导不打断、不发用户气泡——显示
   // 「已引导」轻提示，本轮结束清除；发完输入框立即可继续干别的）
   let guided = {}; // key → [{ text }]
+  /// 划掉一条「已引导」提示（纯展示层；引导早已并入，不影响正在跑的那轮）
+  function dismissGuided(key, idx) {
+    const list = [...(guided[key] || [])];
+    if (idx < 0 || idx >= list.length) return;
+    list.splice(idx, 1);
+    guided = { ...guided, [key]: list };
+  }
 
   // —— 消息操作（2026-10-26 用户需求批）——
   // 回滚/删除共用服务端截断端点（/api/sessions/truncate，按文件里第 N 条 user 消息定位）；
@@ -1325,6 +1332,12 @@
   // 思考与工具按真实发生顺序合成「过程块」；点摘要行展开。流式期间默认展开，
   // 收尾后默认收起（用户 2026-10-02：跑完只留结尾语）。
   let processOpenMap = {}; // `${msgId}:${blockIndex}` → true=展开
+  // 单段思考的展开态：流式中默认展开，思考一结束（done）默认自动折叠；
+  // 用户点过就按用户的选择记（用户 2026-10-30：每次思考完毕要自动折叠）。
+  let thinkOpenMap = {}; // `${msgId}:${blockIndex}:${itemIndex}` → true=展开
+  function toggleThink(key, currentlyOpen) {
+    thinkOpenMap = { ...thinkOpenMap, [key]: !currentlyOpen };
+  }
   // 思考框自动跟随：新分片贴底；滚轮往上滚 → 暂停跟随（出「回到底部」按钮）
   let thinkFollowMap = {}; // `${msgId}:${blockIndex}:${itemIndex}` → 是否跟随
   let thinkBoxEls = {}; // 同上 → 思考滚动容器（bind:this）
@@ -6095,16 +6108,11 @@
             {/if}
             <div class="msg-stack">
             <div class="bubble asst-bubble">
-              {#if m.workStartedAt || m.workMs}
-                <div class="turn-bar" class:live={m.streaming}>
-                  {#if m.streaming && m.workStartedAt}
-                    <span class="live-dot"></span>
-                    <span>正在工作</span>
-                    <span class="turn-time">{fmtDurCn(nowTick - m.workStartedAt)}</span>
-                  {:else if m.workMs}
-                    <svg class="turn-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
-                    <span>已工作 {fmtDurCn(m.workMs)}</span>
-                  {/if}
+              {#if m.streaming && m.workStartedAt}
+                <div class="turn-bar live">
+                  <span class="live-dot"></span>
+                  <span>正在工作</span>
+                  <span class="turn-time">{fmtDurCn(nowTick - m.workStartedAt)}</span>
                 </div>
               {/if}
               {#if m.approval}
@@ -6140,7 +6148,7 @@
               <!-- 过程（思考 + 工具）与正文按真实发生顺序渲染：连续的过程合成一个可展开块，
                    正文把前后过程隔开。多步任务就是「过程 → 说明 → 过程 → 最终回答」。
                    流式期间过程默认展开；收尾后默认收起，只留总结与结尾语（用户 2026-10-02）。 -->
-              {#each buildBlocks(messageParts(m)) as b, bi}
+              {#each buildMessageBlocks(messageParts(m), m.streaming) as b, bi}
                 {@const pk = `${m.id}:${bi}`}
                 {@const open = processOpenMap[pk] !== undefined ? processOpenMap[pk] : !!m.streaming}
                 {#if b.kind === 'process'}
@@ -6151,7 +6159,7 @@
                       title={open ? '收起过程' : '展开思考与工具调用'}
                     >
                       <svg class="process-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 13.7 9l5.5 1.7-5.5 1.7L12 18l-1.7-5.6L4.8 10.7 10.3 9 12 3.5Z"/><path d="m19 15.5.7 2.2 2.3.8-2.3.8-.7 2.2"/></svg>
-                      <span class="process-title">{processSummary(b.items)}</span>
+                      <span class="process-title">{processSummary(b.items, !m.streaming && bi === 0 ? m.workMs : 0)}</span>
                       {#if processIsLive(b.items)}<span class="process-live"><span class="live-dot"></span></span>{/if}
                       <svg class="process-caret" class:open={open} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
                     </button>
@@ -6160,22 +6168,30 @@
                         {#each b.items as it, ii}
                           {@const ik = `${pk}:${ii}`}
                           {#if it.type === 'thinking'}
+                            {@const tOpen = thinkOpenMap[ik] !== undefined ? thinkOpenMap[ik] : !it.done}
                             <div class="think-item">
-                              <div class="think-label">
+                              <button
+                                class="think-label"
+                                on:click={() => toggleThink(ik, tOpen)}
+                                title={tOpen ? '收起这段思考' : '展开这段思考'}
+                              >
                                 <span>{it.ms ? `思考 ${fmtDurCn(it.ms)}` : '思考'}</span>
                                 {#if m.streaming && !it.done}<span class="think-live">进行中</span>{/if}
-                              </div>
-                              <div
-                                class="think-text"
-                                class:streaming={m.streaming && !it.done}
-                                use:thinkFollow={m.streaming && !it.done}
-                                bind:this={thinkBoxEls[ik]}
-                                on:followchange={(e) => (thinkFollowMap = { ...thinkFollowMap, [ik]: e.detail.following })}
-                              >{it.text}</div>
-                              {#if thinkFollowMap[ik] === false}
-                                <button class="think-jump" title="回到底部（继续跟随）" on:click={() => jumpThink(ik)}>
-                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"/><path d="m6 12 6 6 6-6"/></svg>
-                                </button>
+                                <svg class="think-caret" class:open={tOpen} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                              </button>
+                              {#if tOpen}
+                                <div
+                                  class="think-text"
+                                  class:streaming={m.streaming && !it.done}
+                                  use:thinkFollow={m.streaming && !it.done}
+                                  bind:this={thinkBoxEls[ik]}
+                                  on:followchange={(e) => (thinkFollowMap = { ...thinkFollowMap, [ik]: e.detail.following })}
+                                >{it.text}</div>
+                                {#if thinkFollowMap[ik] === false}
+                                  <button class="think-jump" title="回到底部（继续跟随）" on:click={() => jumpThink(ik)}>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"/><path d="m6 12 6 6 6-6"/></svg>
+                                  </button>
+                                {/if}
                               {/if}
                             </div>
                           {:else if it.type === 'tool'}
@@ -6218,6 +6234,9 @@
                                 </div>
                               {/if}
                             </div>
+                          {:else if it.type === 'content'}
+                            <!-- 完成态折叠进来的中途说明：保留原文与 markdown 结构，颜色压暗 -->
+                            <div class="content process-note" on:click={onContentClick}>{@html md(it.text)}</div>
                           {/if}
                         {/each}
                       </div>
@@ -6351,10 +6370,16 @@
         {#if (guided[curKey()] || []).length > 0}
           <!-- 已引导标记（2026-10-22）：静默提示,不占对话气泡位;本轮结束自动消失 -->
           <div class="guided-row">
-            {#each guided[curKey()] as g}
+            {#each guided[curKey()] as g, gi}
               <span class="guided-chip" title={`不打断当前操作,跑完这步就并入:${g.text}`}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></svg>
                 已引导 · {g.text.length > 40 ? g.text.slice(0, 40) + '…' : g.text}
+                <button
+                  class="guided-x"
+                  title="移除这条提示"
+                  aria-label="移除这条提示"
+                  on:click={() => dismissGuided(curKey(), gi)}
+                ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
               </span>
             {/each}
           </div>
@@ -9651,10 +9676,32 @@
     color: var(--accent, #4a9);
     background: color-mix(in srgb, var(--accent, #4a9) 10%, transparent);
   }
-  .guided-chip svg {
+  .guided-chip > svg {
     width: 12px;
     height: 12px;
     flex: none;
+  }
+  .guided-x {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    opacity: 0.55;
+    cursor: pointer;
+    flex: none;
+  }
+  .guided-x:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--accent, #4a9) 16%, transparent);
+  }
+  .guided-x svg {
+    width: 10px;
+    height: 10px;
   }
   .msg.assistant {
     justify-content: flex-start;
@@ -10053,11 +10100,6 @@
   .turn-bar.live {
     color: var(--g6);
   }
-  .turn-clock {
-    width: 12px;
-    height: 12px;
-    flex: none;
-  }
   .turn-time {
     color: var(--g5);
   }
@@ -10139,6 +10181,17 @@
   .process-body {
     padding: 0 10px 8px;
   }
+  /* 完成态折叠进来的中途说明：保留 markdown 结构，但压暗、缩小，别和最终结语抢 */
+  .process-note {
+    margin: 4px 0 8px;
+    padding-left: 2px;
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--g5);
+  }
+  .process-note :global(strong) {
+    color: var(--g6);
+  }
   .think-item {
     position: relative;
     padding: 4px 2px 8px;
@@ -10147,9 +10200,31 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    margin-bottom: 3px;
-    font-size: 11.5px;
+    width: 100%;
+    margin: 0 0 2px;
+    padding: 2px 0;
+    border: 0;
+    background: transparent;
     color: var(--g5);
+    font-size: 11.5px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+  }
+  .think-label:hover {
+    color: var(--g7);
+  }
+  .think-caret {
+    width: 11px;
+    height: 11px;
+    flex: none;
+    margin-left: 1px;
+    color: var(--g5);
+    transition: transform 0.15s;
+  }
+  .think-caret.open {
+    transform: rotate(180deg);
   }
   .think-live {
     padding: 0 5px;

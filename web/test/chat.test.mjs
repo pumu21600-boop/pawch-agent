@@ -10,6 +10,9 @@ import {
   partsFromStoredMessage,
   mergeAssistantRun,
   buildBlocks,
+  buildCompletedView,
+  buildMessageBlocks,
+  isNoiseThinking,
   processSummary,
   processIsLive,
   toolMeta,
@@ -47,6 +50,27 @@ test('思考分片只和未结束的同一段合并；结算后新分片开新�
   // 已结算的思考不会被二次结算
   p = settleThinking(p, 9999);
   assert.equal(p[1].ms, 800);
+});
+
+test('孤立标点思考（. / 。 / …）不生成新的空思考段；已有段内标点照常拼', () => {
+  assert.equal(isNoiseThinking('.'), true);
+  assert.equal(isNoiseThinking('。'), true);
+  assert.equal(isNoiseThinking('…'), true);
+  assert.equal(isNoiseThinking('  '), true);
+  assert.equal(isNoiseThinking('嗯'), false);
+  let p = [];
+  p = appendThinking(p, '.');
+  assert.equal(p.length, 0, '孤立点号不应开新段');
+  p = appendThinking(p, '先想');
+  p = appendThinking(p, '.');
+  assert.equal(p.length, 1);
+  assert.equal(p[0].text, '先想.', '已有思考段内的标点要保留');
+  // 历史里存下的纯标点 reasoning 也不显示
+  const stored = partsFromStoredMessage({ reasoning_content: '.', content: '答案' });
+  assert.deepEqual(
+    stored.map((x) => x.type),
+    ['content']
+  );
 });
 
 test('工具结果只结算最后一个同名 running，失败的留 fail + 预览', () => {
@@ -88,7 +112,34 @@ test('buildBlocks：连续过程合成块，正文隔断，按真实顺序排列
   assert.equal(blocks[1].text, '第一步说明');
 });
 
-test('processSummary：思考时长 + 工具数', () => {
+test('buildCompletedView：完成后只留最后一段结语，执行过程全部折进一个过程块', () => {
+  const parts = [
+    { type: 'thinking', text: '想A', ms: 61000, done: true },
+    { type: 'tool', name: 'shell' },
+    { type: 'content', text: '我来。' },
+    { type: 'thinking', text: '想B', ms: 4000, done: true },
+    { type: 'tool', name: 'write_file' },
+    { type: 'content', text: '做好了：文件已生成。' },
+  ];
+  const blocks = buildCompletedView(parts);
+  assert.deepEqual(
+    blocks.map((b) => b.kind),
+    ['process', 'content']
+  );
+  assert.equal(blocks[0].items.length, 5, '思考/工具/中途说明都在过程块里');
+  assert.equal(blocks[0].items[2].text, '我来。');
+  assert.equal(blocks[1].text, '做好了：文件已生成。');
+  // 简单问答没有过程，不凭空造过程块
+  assert.deepEqual(buildCompletedView([{ type: 'content', text: '答案' }]), [{ kind: 'content', text: '答案' }]);
+  // 纯标点思考不能撑出空过程块
+  assert.deepEqual(buildCompletedView([{ type: 'thinking', text: '.' }, { type: 'content', text: '答案' }]), [
+    { kind: 'content', text: '答案' },
+  ]);
+  // 流式入口仍按真实顺序展开
+  assert.equal(buildMessageBlocks(parts, true).filter((b) => b.kind === 'process').length, 2);
+});
+
+test('processSummary：已工作/思考时长 + 工具数；没有过程时给兜底文案', () => {
   assert.equal(
     processSummary([
       { type: 'thinking', ms: 65000 },
@@ -98,6 +149,11 @@ test('processSummary：思考时长 + 工具数', () => {
     '思考 1 分 5 秒 · 2 个工具'
   );
   assert.equal(processSummary([{ type: 'tool' }]), '1 个工具');
+  assert.equal(
+    processSummary([{ type: 'thinking', ms: 65000 }, { type: 'tool' }], 822000),
+    '已工作 13 分 42 秒 · 思考 1 分 5 秒 · 1 个工具'
+  );
+  assert.equal(processSummary([{ type: 'content', text: '中途说明' }]), '执行过程');
 });
 
 test('processIsLive：只有执行中的工具/未结算的思考才算活', () => {

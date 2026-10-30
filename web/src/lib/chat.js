@@ -21,6 +21,15 @@ export function fmtDurCn(ms) {
   return r ? `${m} 分 ${r} 秒` : `${m} 分`;
 }
 
+/// 只有标点/空白/分隔符的「思考」分片。部分渠道会在正文后补一个 "." 的 reasoning
+/// 分片，若当成新思考段会凭空多出一个空思考块（用户 2026-10-30 实锤截图）。
+/// 注意只在**开新段**时丢弃；已有思考段里的小标点是句子的正常组成，照常拼接。
+export function isNoiseThinking(text) {
+  const t = String(text || '').trim();
+  if (!t) return true;
+  return /^[\p{P}\p{Z}\s]+$/u.test(t);
+}
+
 /// 思考分片：紧挨着同一段思考就续写，遇到正文/工具就开新段
 export function appendThinking(parts, text) {
   if (!text) return parts || [];
@@ -28,7 +37,7 @@ export function appendThinking(parts, text) {
   const last = arr[arr.length - 1];
   if (last && last.type === 'thinking' && !last.done) {
     arr[arr.length - 1] = { ...last, text: last.text + text };
-  } else {
+  } else if (!isNoiseThinking(text)) {
     arr.push({ type: 'thinking', text, ms: 0, done: false });
   }
   return arr;
@@ -113,7 +122,7 @@ export function trimParts(parts, kind, n) {
 /// 一步内的顺序按「思考 → 正文 → 工具调用」——正文通常是调工具前的说明。
 export function partsFromStoredMessage(m) {
   const parts = [];
-  if (m.reasoning_content) {
+  if (m.reasoning_content && !isNoiseThinking(m.reasoning_content)) {
     parts.push({ type: 'thinking', text: m.reasoning_content, ms: m.reasoning_ms || 0, done: true });
   }
   if (m.content) parts.push({ type: 'content', text: m.content });
@@ -197,12 +206,14 @@ export function attachToolPreview(parts, toolCallId, preview) {
   return arr;
 }
 
-/// 渲染分块：连续的非正文（思考/工具）合成一个「过程」块，正文独立成块。
+/// 流式渲染分块：连续的非正文（思考/工具）合成一个「过程」块，正文独立成块。
 /// 这样多步任务按真实顺序呈现：过程 → 说明文字 → 过程 → 最终回答。
 export function buildBlocks(parts) {
   const blocks = [];
   let proc = null;
   for (const p of parts || []) {
+    // 纯标点思考（渠道补的 "."）不渲染，也不让它单独撑出一个过程块
+    if (p.type === 'thinking' && isNoiseThinking(p.text)) continue;
     if (p.type === 'content') {
       if (p.text) blocks.push({ kind: 'content', text: p.text });
       proc = null;
@@ -214,7 +225,38 @@ export function buildBlocks(parts) {
       proc.items.push(p);
     }
   }
+  return blocks.filter((b) => b.kind !== 'process' || b.items.length > 0);
+}
+
+/// 完成态渲染：整轮的执行过程（思考/工具/中途说明）合成**一个**折叠过程块，
+/// 只保留最后一段正文作为结语（用户 2026-10-30：「任务执行完毕只保留『做好了』下面的结语」）。
+/// 判断「结语」= 最后一段非空正文；它之前的全部内容都可折叠回看。
+export function buildCompletedView(parts) {
+  const list = (parts || []).filter(
+    (p) => !(p.type === 'thinking' && isNoiseThinking(p.text)) && !(p.type === 'content' && !String(p.text || '').trim())
+  );
+  let finalIdx = -1;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].type === 'content') {
+      finalIdx = i;
+      break;
+    }
+  }
+  if (finalIdx < 0) {
+    return list.length ? [{ kind: 'process', items: list }] : [];
+  }
+  const before = list.slice(0, finalIdx);
+  const after = list.slice(finalIdx + 1);
+  const blocks = [];
+  if (before.length) blocks.push({ kind: 'process', items: before });
+  blocks.push({ kind: 'content', text: list[finalIdx].text });
+  if (after.length) blocks.push({ kind: 'process', items: after });
   return blocks;
+}
+
+/// 模板统一入口：流式按真实顺序展开，完成态折叠成「过程 + 结语」
+export function buildMessageBlocks(parts, streaming) {
+  return streaming ? buildBlocks(parts) : buildCompletedView(parts);
 }
 
 /// 过程块是否还在跑：有执行中的工具，或还有没结算的思考段。
@@ -225,15 +267,18 @@ export function processIsLive(items) {
   );
 }
 
-/// 过程块的摘要：「思考 6 分 29 秒 · 7 个工具」
-export function processSummary(items) {
+/// 过程块的摘要：「已工作 13 分 42 秒 · 思考 6 分 27 秒 · 9 个工具」
+/// workMs 只在完成态传入（把顶部的「已工作」并进这一行，少一行噪音）。
+export function processSummary(items, workMs = 0) {
   const list = items || [];
   const thinkMs = list.filter((i) => i.type === 'thinking').reduce((s, i) => s + (i.ms || 0), 0);
   const tools = list.filter((i) => i.type === 'tool').length;
   const bits = [];
+  if (workMs > 0) bits.push(`已工作 ${fmtDurCn(workMs)}`);
   if (thinkMs > 0) bits.push(`思考 ${fmtDurCn(thinkMs)}`);
   else if (list.some((i) => i.type === 'thinking')) bits.push('思考');
   if (tools) bits.push(`${tools} 个工具`);
+  if (!bits.length) bits.push('执行过程');
   return bits.join(' · ');
 }
 
