@@ -78,6 +78,9 @@ async fn main() -> anyhow::Result<()> {
         "logger ready: {}",
         log_dir.join(&config.logging.file).display()
     ));
+    // panic 兜底（2026-10-30）：任何线程 panic 都先落一条 JSONL（kind=panic），
+    // 再走默认 stderr；否则 spawn 里的 panic 只让流静默结束、日志一片空白。
+    observability::install_panic_hook();
 
     // —— 设置：settings.json 持久化；首次用 config.toml 的 gateway 节作种子 ——
     let user_settings = config::settings::Settings::load(&config.gateway.base_url, &config.gateway.model);

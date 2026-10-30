@@ -267,6 +267,65 @@ pub fn log_path() -> Option<&'static Path> {
     LOGGER.get().map(|l| l.path())
 }
 
+/// 全局 panic 兜底（2026-10-30）：仓库里原先没有任何 panic hook——跑在 spawn 里的
+/// 任务 panic 只会静默 unwind，日志里连一行都没有。装上后任何线程的 panic 都会先落
+/// 一条 `event_type=error / kind=panic`（信息、位置、线程、栈摘要），再交给原 hook
+/// （stderr 照旧）。对话主循环另有 `run_turn_guarded` 把 panic 转成前端错误气泡。
+pub fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // 防递归：hook 里再 panic 会 abort 整个进程
+        thread_local! {
+            static IN_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        if !IN_HOOK.with(|c| c.replace(true)) {
+            // 日志自身出问题也不许在 panic 处理里再炸（二次 panic = abort）
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let message = info
+                    .payload()
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "未知 panic（payload 不是字符串）".to_string());
+                let location = info
+                    .location()
+                    .map(|l| format!("{}:{}", l.file(), l.line()))
+                    .unwrap_or_default();
+                let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+                let backtrace =
+                    truncate_chars(&std::backtrace::Backtrace::force_capture().to_string(), 4000);
+                try_event(
+                    EventType::Error,
+                    panic_record(&message, &location, &thread, &backtrace),
+                );
+            }));
+            IN_HOOK.with(|c| c.set(false));
+        }
+        prev(info);
+    }));
+}
+
+/// 全局 panic 的 JSONL 记录形状（单测钉住字段，防以后改坏）。
+pub(crate) fn panic_record(message: &str, location: &str, thread: &str, backtrace: &str) -> Value {
+    json!({
+        "kind": "panic",
+        "message": message,
+        "location": location,
+        "thread": thread,
+        "backtrace": backtrace,
+    })
+}
+
+/// 按**字符**截断（别按字节切，多字节字符中间会 panic——本仓有前车之鉴）。
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push_str("…（已截断）");
+    out
+}
+
 pub mod trace;
 pub use trace::read_tasks_scoped_multi;
 
@@ -334,5 +393,26 @@ mod tests {
         assert_eq!(rotate_file(&path, 50, 0).unwrap(), Some(100));
         assert!(!path.exists() && !backup_path(&path, 1).exists(), "keep=0 应直接删除不留归档");
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 2026-10-30：全局 panic hook 的记录形状（kind=panic + 四要素）。
+    #[test]
+    fn panic_record_has_expected_shape() {
+        let v = panic_record("boom", "src/x.rs:12", "worker-1", "stack...");
+        assert_eq!(v["kind"], json!("panic"));
+        assert_eq!(v["message"], json!("boom"));
+        assert_eq!(v["location"], json!("src/x.rs:12"));
+        assert_eq!(v["thread"], json!("worker-1"));
+        assert_eq!(v["backtrace"], json!("stack..."));
+    }
+
+    /// 栈摘要按字符截断：多字节字符中间切会 panic（本仓 decode_entities 前车之鉴）。
+    #[test]
+    fn truncate_chars_is_char_safe() {
+        let long = "中".repeat(100);
+        let cut = truncate_chars(&long, 10);
+        assert!(cut.starts_with(&"中".repeat(10)), "保留前 10 个字符: {cut}");
+        assert!(cut.ends_with("…（已截断）"));
+        assert_eq!(truncate_chars("短", 10), "短", "未超限原样返回");
     }
 }

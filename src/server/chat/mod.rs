@@ -129,6 +129,54 @@ fn apply_projections_to_last_user(history: &mut [Value], projections: &[String])
     }
 }
 
+/// 一轮对话任务的 panic 兜底（2026-10-30）：此前整轮跑在裸 `tokio::spawn` 里，
+/// JoinHandle 被丢弃，任何 panic 只会让 SSE sender 被 drop → 流静默结束、`done`
+/// 事件从未发出 → 前端把空回答气泡删掉，用户看到「消息发出去，什么都没了」。
+///
+/// 现在把任务体包进 `catch_unwind`：捕到 panic 就发一条 `error` 事件（前端显示
+/// 错误气泡）+ 一条 `done`（前端正常收尾），并落一条 JSONL（kind=chat.turn_panicked）。
+/// 返回值仅供测试断言（None = 正常结束）。
+pub(super) async fn run_turn_guarded<F, S>(
+    session: &str,
+    mut send: S,
+    fut: F,
+) -> Option<String>
+where
+    F: std::future::Future<Output = ()>,
+    S: FnMut(Value),
+{
+    use futures_util::FutureExt;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(()) => None,
+        Err(payload) => {
+            let detail = panic_payload_text(payload.as_ref());
+            observability::try_event(EventType::Error, panic_event(session, &detail));
+            send(json!({
+                "session": session,
+                "error": format!(
+                    "本轮任务异常终止（内部错误）：{detail}。这条消息没有丢，可以直接重发；若反复出现，请把日志里的 chat.turn_panicked 记录一并反馈。"
+                ),
+            }));
+            send(json!({ "done": true }));
+            Some(detail)
+        }
+    }
+}
+
+/// 对话轮 panic 的 JSONL 记录（形状单测钉住；全局 panic hook 用另一条 `kind=panic`）。
+pub(super) fn panic_event(session: &str, detail: &str) -> Value {
+    json!({ "kind": "chat.turn_panicked", "session": session, "error": detail })
+}
+
+/// panic payload → 人话（`&str` / `String`；其它类型给固定说明）。
+fn panic_payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "未知 panic（payload 不是字符串）".to_string())
+}
+
 /// 流式对话：base_url/model/key 全部来自已保存设置（请求级 api_key 可覆盖）。
 pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequest>) -> Response {
     let message = req.message.trim().to_string();
@@ -386,7 +434,17 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
             }
         });
     }
+    // 2026-10-30：整轮任务套 catch_unwind——panic 不再让 SSE 静默结束（前端空白气泡），
+    // 而是转成 error 事件 + JSONL（见 run_turn_guarded）。
+    let guard_tx = tx.clone();
+    let guard_session = session_id.clone();
     tokio::spawn(async move {
+        run_turn_guarded(
+            &guard_session,
+            |payload| {
+                let _ = guard_tx.send(Ok(json_event(payload)));
+            },
+            async move {
         // 非 move 闭包：按引用捕获 tx / peer_gone——ChatGate 后面还要 tx.clone()
         let send = |payload: Value| {
             if tx.send(Ok(json_event(payload))).is_err() {
@@ -1106,6 +1164,9 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
         }
         // 钩子（027）：任务结束挂点（Done / Cancelled / 出错都算结束；含续跑轮）
         crate::hooks::session_end(&session_id).await;
+            },
+        )
+        .await;
     });
 
     Sse::new(UnboundedReceiverStream::new(rx)).into_response()
@@ -1137,6 +1198,37 @@ impl Drop for CancelRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-10-30：对话轮 panic 不再静默——必须发 error + done，取消登记随守卫注销
+    /// （否则前端停在「正在运行」，/api/cancel 也一直显示 running）。
+    #[tokio::test]
+    async fn panicking_turn_reports_error_and_leaves_no_zombie() {
+        let reg = Arc::new(CancelRegistry::new());
+        let flag = reg.try_begin("sess-panic").expect("应先占位成功");
+        let run = CancelRun::from_flag(reg.clone(), "sess-panic", flag);
+        let mut events: Vec<Value> = Vec::new();
+        let detail = run_turn_guarded("sess-panic", |v| events.push(v), async move {
+            let _run = run; // 模拟任务体持有的取消守卫（Drop 即注销）
+            panic!("boom-turn");
+        })
+        .await;
+        assert_eq!(detail.as_deref(), Some("boom-turn"), "要拿到 panic 信息");
+        assert_eq!(events.len(), 2, "应发 error + done 两条: {events:?}");
+        assert_eq!(events[0]["session"], json!("sess-panic"));
+        let err = events[0]["error"].as_str().unwrap_or_default();
+        assert!(err.contains("boom-turn"), "错误事件要带原因: {err}");
+        assert_eq!(events[1]["done"], json!(true), "要补 done 让前端收尾");
+        assert!(!reg.is_active("sess-panic"), "panic 后不许留下「永远在跑」的僵尸会话");
+    }
+
+    /// JSONL 记录形状（前端错误气泡之外的排障现场）。
+    #[test]
+    fn panic_event_shape() {
+        let v = panic_event("s1", "boom");
+        assert_eq!(v["kind"], json!("chat.turn_panicked"));
+        assert_eq!(v["session"], json!("s1"));
+        assert_eq!(v["error"], json!("boom"));
+    }
 
     /// 本轮上下文取会话文件（工具调用/思考都在里面），只接上本条新用户消息。
     /// 反例（本次修的真机 bug）：拿前端请求的 messages 当历史——它只有 role+content，
