@@ -221,3 +221,27 @@
 - ~~壳启动后窗口会自行 resize 一次~~：2026-10-30 复测从启动首帧连续采样 ~4.8s，窗口尺寸全程恒定 1280×860，不复现；代码侧无 bounds 存取，判定为早期版本/特定环境的一次性观察。
 - 面板首次打开时 webview 从占位到页面有一次约 30ms 的出现（HWND 就位，固有代价，不修）。
 - 无头模式（普通浏览器开 5173）的「⋯」菜单只有一项（开发者工具仅壳模式下有，正常设计）。
+
+## 2026-10-30 聊天排布重做 + 工程门禁（本轮）
+
+**用户诉求**：①继续完善工程能力；②优化思考/工具调用/输出内容的排布合理性（参考 ZCode），并把 UI 做漂亮。
+
+### 1. 聊天排布：按真实发生顺序分段（App.svelte + lib/chat.js）
+
+- 新增 `web/src/lib/chat.js`：流式 `parts` 分段（thinking / content / tool）、历史 `partsFromStoredMessage`、`mergeAssistantRun`、`buildBlocks`、`trimParts`、`toolMeta`/`prettyArgs` 工具人话化。落盘 JSONL 形状不动，`parts` 只活在展示层。
+- 之前一轮回复被渲染成「所有思考 → 所有工具卡 → 全文」三坨；现在连续的过程合成一个可展开「过程块」，正文把过程块隔开，多步任务呈「过程 → 说明 → 过程 → 最终回答」。流式期间过程默认展开，收尾后默认收起（用户 2026-10-02「跑完只留结尾语」）。
+- 工具调用不再刷原始 JSON：动作中文名（写入文件/执行命令/浏览器…）+ 对象摘要（路径/命令/URL）+ 状态点/勾/叉；点行才展开参数与结果。
+- 思考不再是行小灰字：过程块内按段显示「思考 N 秒」+ 正文，流式自动跟随、上滚暂停、可按段展开；历史展开不自动跳底。
+- 正文排版：14.5px/1.78，标题/列表/引用层级化；代码块独立卡片（语言标签 + 复制按钮），表格加边框；用户消息保留纯文本右对齐（不加气泡）。
+- **实锤修复**：markdown 是 `{@html}` 运行时生成，元素没有 Svelte 作用域类；原 `.content .md-*` 选择器被编译器当「未使用」整段裁掉（构建产物里一条 md 样式都没有，代码块/表格一直吃浏览器默认样式）。现全部改 `:global()`，并加构建产物检查 `scripts/check_md_css.mjs` 防回归。
+
+### 2. 工程能力
+
+- **前端从零单测**：`web/test/chat.test.mjs`（分段/合并/trim/工具摘要/时长）+ `web/test/md.test.mjs`（XSS/代码块/链接/表格），`npm test`（node:test，零额外依赖）；CI 前端 job 增加单测 + `check_md_css.mjs` 构建产物检查。
+- **设置 schema 不变式单测**：`src/config/settings_schema.rs` 7 条（路径唯一、类型/风险词表、枚举、active_config_id 必须最先应用、manifest 顺序、red_line 派生、roles/features 子路径对齐）。
+
+### 验收
+
+- `cargo test --no-fail-fast`：509 过 / 0 挂 / 3 ignored；`cargo clippy --all-targets -- -D warnings`：零告警。
+- `npm test`：17 过；`npm run build` + `check_md_css.mjs` + `check_fetch_json.mjs` 均过。
+- 真机（运行中的 release 服务 5173）：深/浅两套主题截图核对；用注入 SSE 走真实前端流式路径，验证思考→工具→正文分段、工具行人话化、失败状态、过程自动展开；工具详情展开/收起实测；代码块复制入口已接线——无头合成点击没有剪贴板授权，真机走 Clipboard API、失败自动退 execCommand。临时预览会话/脚本/截图已全部清理。
