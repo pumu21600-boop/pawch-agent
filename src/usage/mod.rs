@@ -106,8 +106,20 @@ struct Ledger {
 }
 
 static LEDGER: OnceLock<Ledger> = OnceLock::new();
-/// 累计花费（美元，f64 存 bits）：启动时扫台账装入，之后随记录增量更新。
-static SPEND: AtomicU64 = AtomicU64::new(0);
+/// 累计花费（美元）：启动时扫台账装入，之后随记录增量更新。
+///
+/// 2026-10-30 修：原先是 `AtomicU64` 存 f64 bits 做 load→加→store 的读改写，
+/// 两个请求同时结束会各读旧值、各写回，只记一次增量——而它是花费硬闸
+/// （`cap_block`）的唯一数据源，少记 = 超支放行。f64 没有可用的 CAS 累加，
+/// 改用互斥锁保护（临界区只有一次加法）。
+static SPEND: Mutex<f64> = Mutex::new(0.0);
+/// 台账「读改写」串行锁：`record()` 的追加与 `recompute()` 的整表重写互斥。
+///
+/// 不加这把锁时，recompute 的窗口是「读全表 → 原子写新文件 → reopen」，
+/// 期间 record 追加的行写在**旧文件**上，随后被新文件替换 → 永久丢失
+/// （价格页保存会自动触发 recompute，用户可触发）。锁顺序固定为
+/// 「WRITE_LOCK → Ledger.file」，两处入口一致，不会死锁。
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// 全局花费上限（美元；0 = 不限）。config.toml [cost] spend_cap_usd。
 static CAP: RwLock<f64> = RwLock::new(0.0);
 /// 价格表（settings.json 的 cost.prices；设置变更即同步，测试可替换）。
@@ -194,7 +206,7 @@ pub fn init(dir: &Path) {
             None => unpriced += 1,
         }
     }
-    SPEND.store(total.to_bits(), Ordering::Relaxed);
+    *SPEND.lock().unwrap_or_else(|e| e.into_inner()) = total;
     let _ = LEDGER.set(ledger);
     try_event(
         EventType::State,
@@ -220,14 +232,16 @@ pub fn record(mut rec: UsageRecord) {
     let Some(ledger) = LEDGER.get() else { return };
     // 费用按当前价格算定并冻结；未命中价格表 = 未计价（累计值不加，界面显式提示）
     rec.cost_usd = cost_now(&rec);
-    if let Some(c) = rec.cost_usd {
-        let cur = f64::from_bits(SPEND.load(Ordering::Relaxed));
-        SPEND.store((cur + c).to_bits(), Ordering::Relaxed);
-    }
     let line = match serde_json::to_string(&rec) {
         Ok(s) => s,
         Err(_) => return,
     };
+    // 追加与 recompute 的整表重写必须互斥（否则重写窗口内的追加会随旧文件被替换而丢），
+    // 累计花费也在同一临界区里加，保证「台账行数」与「累计值」永远同进同退。
+    let _w = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = rec.cost_usd {
+        *SPEND.lock().unwrap_or_else(|e| e.into_inner()) += c;
+    }
     ledger.append(&line);
 }
 
@@ -235,6 +249,9 @@ pub fn record(mut rec: UsageRecord) {
 /// 原子重写台账（fsx 原子写），返回 (重算条数, 仍未计价条数)；同步刷新累计花费。
 pub fn recompute() -> Result<(usize, usize), String> {
     let Some(ledger) = LEDGER.get() else { return Err("台账未初始化".into()) };
+    // 整段（读全表 → 重写 → reopen → 刷新累计）持写锁：与 record 互斥，
+    // 期间的新记录会排队，等新句柄就位后追加到新文件，不会丢。
+    let _w = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut records = ledger.read_all();
     let mut unpriced = 0usize;
     let mut total = 0.0f64;
@@ -255,7 +272,7 @@ pub fn recompute() -> Result<(usize, usize), String> {
     }
     crate::fsx::write_atomic_str(&ledger.path, &text).map_err(|e| format!("重写台账失败: {e}"))?;
     ledger.reopen(); // 原子替换后重开追加句柄——否则后续记录写进已删除的旧文件
-    SPEND.store(total.to_bits(), Ordering::Relaxed);
+    *SPEND.lock().unwrap_or_else(|e| e.into_inner()) = total;
     try_event(
         EventType::State,
         json!({ "kind": "usage.ledger_recomputed", "records": records.len(), "spend_usd": total, "unpriced": unpriced }),
@@ -276,7 +293,7 @@ pub fn cap_value() -> f64 {
 
 /// 累计花费（美元，台账全量口径）。
 pub fn spend_total() -> f64 {
-    f64::from_bits(SPEND.load(Ordering::Relaxed))
+    *SPEND.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// 金额的人话展示：按量级自适应精度（至少 2 位，至多 6 位，去尾零）。
@@ -733,5 +750,74 @@ mod tests {
         let t = Instant::now();
         std::thread::sleep(std::time::Duration::from_millis(5));
         assert!(t.elapsed().as_millis() >= 5);
+    }
+
+    /// 2026-10-30：并发 record 不许丢增量（原来 SPEND 是 load→加→store 的读改写，
+    /// 两个请求同时结束只记一次——而它是花费硬闸的唯一数据源）。
+    #[test]
+    fn concurrent_record_does_not_lose_spend() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        ledger();
+        // 每笔 0.125 美元（1M prompt × 0.125/M，二进制精确；丢一笔差 0.125 远大于容差）
+        install_prices(&[ModelPrice {
+            provider: "*".into(),
+            model: "*".into(),
+            prompt: 0.125,
+            cached: 0.0,
+            completion: 0.0,
+        }]);
+        let before = spend_total();
+        let threads = 8;
+        let per_thread = 25;
+        let mut handles = Vec::new();
+        for _ in 0..threads {
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..per_thread {
+                    record(rec_at("sess-race-spend", "api.race-spend.com", "m", (1_000_000, 0, 0, "ok", 1)));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("记账线程不许 panic");
+        }
+        let n = (threads * per_thread) as f64;
+        let delta = spend_total() - before;
+        // 每笔 0.125，累计浮点误差在 1e-13 量级；丢一笔差 0.125，这里不可能糊过去
+        assert!((delta - n * 0.125).abs() < 1e-9, "并发记账丢增量：应为 {} 实际 {delta}", n * 0.125);
+        // 台账行数也要一条不少
+        assert_eq!(count_records("sess-race-spend"), (threads * per_thread) as usize, "台账行数应与记账次数一致");
+    }
+
+    /// 2026-10-30：recompute（读全表 → 原子重写 → reopen）与 record 并发时，
+    /// 重写窗口里追加的行不许随旧文件被替换而丢失。
+    #[test]
+    fn recompute_and_record_do_not_lose_rows() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        ledger();
+        prices_star();
+        let session = "sess-recompute-race";
+        let baseline = count_records(session);
+        let writer = std::thread::spawn(move || {
+            for _ in 0..120 {
+                record(rec_at(session, "api.rc.com", "m", (1000, 0, 0, "ok", 1)));
+                std::thread::yield_now();
+            }
+        });
+        // 写作线程跑的同时反复重写整表
+        for _ in 0..20 {
+            recompute().expect("重算应成功");
+        }
+        writer.join().expect("记账线程不许 panic");
+        assert_eq!(count_records(session) - baseline, 120, "recompute 与 record 并发不许丢记录");
+    }
+
+    /// 数台账里某个会话的记录条数（并发用例断言行数用）。
+    fn count_records(session: &str) -> usize {
+        let path = ledger().path.clone();
+        let Ok(text) = std::fs::read_to_string(&path) else { return 0 };
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<UsageRecord>(l).ok())
+            .filter(|r| r.session_id == session)
+            .count()
     }
 }
