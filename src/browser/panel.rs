@@ -14,25 +14,47 @@ pub(crate) fn check_panel_url(url: &str) -> Result<(), BrowserError> {
 }
 
 /// 面板状态：浏览器是否在跑 + 全部标签页（含可见/加载/挂起）+ 可见页弹窗。
+///
+/// 2026-10-30：原先整段持着全局 SESSION 锁做三件慢事（3s 探活、逐 tab 关页、
+/// 每 tab 两次 CDP evaluate），而前端每 2s 轮询一次——页面一卡死，agent 的
+/// browser 工具（走 current_session）就排在锁后面无限等。现在锁内只做快照
+/// （克隆 Arc），探活/摘死页/取标题全部在锁外做。
 pub async fn panel_state() -> Value {
-    let mut guard = SESSION.lock().await;
-    let Some(s) = guard.as_ref() else {
+    let snapshot = SESSION.lock().await.clone();
+    let Some(s) = snapshot else {
         return json!({ "running": false, "tabs": [], "dialog": null, "mode": "headless" });
     };
     let mode = mode_name(s.mode);
     if !browser_alive(s.port).await {
-        // 端口没了（壳关了/浏览器进程死了）：会话整体作废——下次动作会自动重建
+        // 端口没了（壳关了/浏览器进程死了）：会话整体作废——下次动作会自动重建。
+        // 只摘「全局登记仍是它」的会话，kill 在锁外做（避免误杀别人刚重建的新会话）。
         log("browser.stale", json!({}));
-        if let Some(dead) = guard.take() {
+        if let Some(dead) = take_session_if_current(&s).await {
             kill_child(&dead);
         }
         return json!({ "running": false, "tabs": [], "dialog": null, "mode": mode });
     }
-    // 端口活着也要摘僵尸 tab：壳重启后 9223 复生，但旧连接的 actor 早退了
-    let _ = reap_dead_tabs(&mut guard).await;
-    let Some(s) = guard.as_ref() else {
-        return json!({ "running": false, "tabs": [], "dialog": null, "mode": "headless" });
-    };
+    // 端口活着也要摘僵尸 tab：壳重启后 9223 复生，但旧连接的 actor 早退了。
+    // 同样不持全局锁：先只读算清单，再逐个关。
+    let dead: Vec<String> = s
+        .tabs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|t| !t.cdp.is_alive())
+        .map(|t| t.id.clone())
+        .collect();
+    for id in &dead {
+        close_tab(&s, id).await;
+    }
+    if s.tabs.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+        // 全死：摘除登记并回收（下一次动作 ensure_session 会重建，这里不抢着拉）
+        log("browser.stale", json!({ "reason": "tabs-dead" }));
+        if let Some(dead_session) = take_session_if_current(&s).await {
+            kill_child(&dead_session);
+        }
+        return json!({ "running": false, "tabs": [], "dialog": null, "mode": mode });
+    }
     let mut briefs = s.tab_briefs().await;
     let visible = s.visible();
     // loading / dialog 只对可见页细算（其余页不值得花 CDP 往返）

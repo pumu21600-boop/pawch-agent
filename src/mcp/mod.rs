@@ -12,8 +12,10 @@
 //!   匹配帧）；`Mcp-Session-Id` 响应头拿到后在同 server 的后续请求里回带；
 //!   通知（无 id）只校验 2xx/202 不看响应体。
 //!
-//! 线程模型：每个 server 串行 Mutex（工具调用本就串行）；两种 transport 都是阻塞
+//! 线程模型：每个 server 一把执行态锁（工具调用本就串行）；两种 transport 都是阻塞
 //! IO，整体调用包 tokio timeout（超时放弃等待，残留响应由「id 不匹配即跳过」自愈）。
+//! 审批判定/工具清单走**轻量快照**（ServerBrief），不和执行态锁抢——一个卡住的
+//! server 不许把异步执行器上的风险判定一起拖死（2026-10-30 修）。
 //! 子进程挂 kill-on-close Job 保险丝（crate::jobguard，审计 09）：正常断开走 reset_proc
 //! 显式 kill；服务被硬杀/崩溃时 Job 句柄随进程消失，node 进程树整树团灭不留孤儿。
 //! 崩溃只标记离线，绝不拖垮主服务。
@@ -28,7 +30,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::Duration,
 };
 
@@ -113,10 +115,73 @@ impl ServerState {
     }
 }
 
-static MANAGER: OnceLock<Mutex<HashMap<String, ServerState>>> = OnceLock::new();
+/// 单个 server 的轻量只读快照：审批判定（risk_for）与工具清单下发（tool_definitions）
+/// 走它，**绝不碰执行态锁**——`tools/call` 可能持锁跑满 120s，快照读必须毫秒级返回。
+#[derive(Clone, Default)]
+struct ServerBrief {
+    enabled: bool,
+    online: bool,
+    tools: Vec<(String, String, Value)>,
+    caps: (bool, bool),
+    resources: Vec<(String, String, String)>,
+    prompts: Vec<(String, String)>,
+}
 
-fn mgr() -> &'static Mutex<HashMap<String, ServerState>> {
+impl ServerBrief {
+    fn from_state(st: &ServerState) -> Self {
+        Self {
+            enabled: st.cfg.as_ref().map(|c| c.enabled).unwrap_or(false),
+            online: st.online,
+            tools: st.tools.clone(),
+            caps: st.caps,
+            resources: st.resources.clone(),
+            prompts: st.prompts.clone(),
+        }
+    }
+}
+
+/// 一个 server 的两层状态：
+/// - `state`：进程/连接/rpc 执行态（大锁，可能被 120s 的 tools/call 长期持有）
+/// - `brief`：供 risk_for / tool_definitions / status / catalogs 读的轻量快照
+struct ManagedServer {
+    state: Mutex<ServerState>,
+    brief: RwLock<ServerBrief>,
+}
+
+impl ManagedServer {
+    fn new(state: ServerState) -> Arc<Self> {
+        let brief = ServerBrief::from_state(&state);
+        Arc::new(Self { state: Mutex::new(state), brief: RwLock::new(brief) })
+    }
+
+    /// 改完执行态后同步快照（调用方必须持有 `state` 锁，避免读到半更新状态）。
+    fn publish(&self, st: &ServerState) {
+        *self.brief.write().unwrap_or_else(|e| e.into_inner()) = ServerBrief::from_state(st);
+    }
+
+    fn brief(&self) -> ServerBrief {
+        self.brief.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+static MANAGER: OnceLock<Mutex<HashMap<String, Arc<ManagedServer>>>> = OnceLock::new();
+
+fn mgr() -> &'static Mutex<HashMap<String, Arc<ManagedServer>>> {
     MANAGER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 取一个 server 的句柄（全局表锁只持有一瞬，后续慢操作都在 per-server 锁里）。
+fn managed(name: &str) -> Option<Arc<ManagedServer>> {
+    mgr().lock().unwrap_or_else(|e| e.into_inner()).get(name).cloned()
+}
+
+/// 全部 server 句柄（按名字排序，顺带保住工具定义的稳定顺序）。
+fn all_managed() -> Vec<(String, Arc<ManagedServer>)> {
+    let m = mgr().lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<(String, Arc<ManagedServer>)> =
+        m.iter().map(|(k, s)| (k.clone(), s.clone())).collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
 }
 
 /// 从全名解析 (server, tool)；非 mcp__ 前缀返回 None。
@@ -132,25 +197,26 @@ pub fn split_full_name(full: &str) -> Option<(String, String)> {
 /// 强制某 server 下线（杀子进程/丢 HTTP 会话、清工具缓存）：撤销授权、配置大改后用。
 /// 下次工具调用/refresh 时按需重连（无 token 的 OAuth 服务会拿到「需要授权」人话）。
 pub fn force_offline(name: &str) {
-    let mut m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(st) = m.get_mut(name) {
-        st.reset_proc();
-        st.tools.clear();
-    }
+    let Some(ms) = managed(name) else { return };
+    let mut st = ms.state.lock().unwrap_or_else(|e| e.into_inner());
+    st.reset_proc();
+    st.tools.clear();
+    ms.publish(&st);
 }
 
 /// settings 加载/保存后同步配置：新增的占位、删除的杀进程下线。
 /// 不在这里主动 spawn（首次工具调用/refresh 时按需启动）。
 pub fn sync_configs(cfgs: &[McpServerCfg]) {
-    let mut m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-    // 下线被删除/禁用的
     let names: Vec<String> = cfgs.iter().map(|c| c.name.clone()).collect();
-    for (name, st) in m.iter_mut() {
-        if !names.contains(name) {
+    // 先在**全局表锁外**逐个改执行态：某个 server 正在跑长 rpc 时只会让本次同步等它，
+    // 不会把整张表（risk_for / tool_definitions 的入口）一起堵住。
+    for (name, ms) in all_managed() {
+        let mut st = ms.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !names.contains(&name) {
             st.reset_proc();
             st.cfg = None;
             st.tools.clear();
-        } else if let Some(c) = cfgs.iter().find(|c| &c.name == name) {
+        } else if let Some(c) = cfgs.iter().find(|c| c.name == name) {
             let changed = st
                 .cfg
                 .as_ref()
@@ -170,9 +236,15 @@ pub fn sync_configs(cfgs: &[McpServerCfg]) {
             }
             st.cfg = Some(c.clone());
         }
+        ms.publish(&st);
     }
+    // 新增的 server：只建占位（cfg 就位、工具清单空），第一次调用/refresh 时拉起。
+    let mut m = mgr().lock().unwrap_or_else(|e| e.into_inner());
     for c in cfgs {
-        m.entry(c.name.clone()).or_default().cfg = Some(c.clone());
+        if !m.contains_key(&c.name) {
+            let st = ServerState { cfg: Some(c.clone()), ..Default::default() };
+            m.insert(c.name.clone(), ManagedServer::new(st));
+        }
     }
 }
 
@@ -694,37 +766,47 @@ fn parse_sse_frames(body: &str) -> Vec<Value> {
 
 /// 公开：拉起（或重连）一个 server 并刷新工具清单。
 pub fn ensure_online_by_name(name: &str) -> Result<usize, String> {
-    let mut m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-    let st = m.get_mut(name).ok_or("未知 server")?;
-    ensure_online(st)?;
-    Ok(st.tools.len())
+    let ms = managed(name).ok_or("未知 server")?;
+    let mut st = ms.state.lock().unwrap_or_else(|e| e.into_inner());
+    let r = ensure_online(&mut st);
+    let n = st.tools.len();
+    // 失败也要 publish：ensure_online 已把 online 置假/清了连接，快照不能还显示在线
+    ms.publish(&st);
+    r.map(|_| n)
 }
 
 /// 公开：server 状态快照（UI 用）。
 pub fn status() -> Vec<(String, bool, Vec<ToolBrief>)> {
-    let mut m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-    // 先回收已退出的进程：否则 server 崩了没人调用的话，界面会长期显示「在线」假状态
-    reap_dead_locked(&mut m);
-    m.iter()
-        .map(|(name, st)| {
-            (
-                name.clone(),
-                st.online,
-                st.tools.iter().map(|(n, d, _)| (n.clone(), d.clone())).collect(),
-            )
-        })
-        .collect()
+    // 先回收已退出的进程：否则 server 崩了没人调用的话，界面会长期显示「在线」假状态。
+    // 用 try_lock：正在跑长 rpc 的 server 先按快照报，不能让状态栏把执行态锁拖住。
+    let mut out = Vec::new();
+    for (name, ms) in all_managed() {
+        if let Ok(mut st) = ms.state.try_lock() {
+            let dead = st
+                .child
+                .as_mut()
+                .map(|child| matches!(child.try_wait(), Ok(Some(_))))
+                .unwrap_or(false);
+            if dead {
+                st.reset_proc();
+            }
+            ms.publish(&st);
+        }
+        let b = ms.brief();
+        out.push((name, b.online, b.tools.iter().map(|(n, d, _)| (n.clone(), d.clone())).collect()));
+    }
+    out
 }
 
 /// 审批档判定（rules.rs mcp__ 分支调用）。
 /// 未确认 → Dangerous；禁用 → Dangerous；确认过 → Normal（2026-10-04 用户拍板：
 /// 去掉每服务独立审批档，MCP 工具与内置工具一样跟随输入框的全局档位）。
+/// **只读轻量快照**：不在异步 worker 上等一个卡住的 server（2026-10-30 修）。
 pub fn risk_for(full_name: &str) -> Option<u8> {
     let (srv, _tool) = split_full_name(full_name)?;
-    let m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-    let st = m.get(&srv)?;
-    let cfg = st.cfg.as_ref()?;
-    if !cfg.enabled {
+    let ms = managed(&srv)?;
+    let b = ms.brief();
+    if !b.enabled {
         return Some(2); // Dangerous：停用的 MCP 工具不可调用
     }
     Some(1) // Normal：按全局审批档位走（2026-10-04 用户拍板：装了就能用，无首装确认）
@@ -773,17 +855,14 @@ fn synth_def(srv: &str, name: &str) -> Value {
 /// 一部分（Anthropic 协议里 tools 排在 system 之后、messages 之前），顺序一变整个
 /// 前缀作废、缓存全丢。按 server 名排序后，重启/重连前后逐字节一致（缓存命中率的地基）。
 pub fn tool_definitions() -> Vec<Value> {
-    let m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-    let mut servers: Vec<(&String, &ServerState)> = m
-        .iter()
-        .filter(|(_, st)| {
-            st.online && st.cfg.as_ref().map(|c| c.enabled).unwrap_or(false)
-        })
-        .collect();
-    servers.sort_by(|a, b| a.0.cmp(b.0));
+    // 只读快照：即使某个 server 正卡在 120s 的 tools/call 里，这里也毫秒级返回。
     let mut out = Vec::new();
-    for (srv, st) in servers {
-        for (name, desc, schema) in &st.tools {
+    for (srv, ms) in all_managed() {
+        let b = ms.brief();
+        if !(b.online && b.enabled) {
+            continue;
+        }
+        for (name, desc, schema) in &b.tools {
             out.push(json!({
                 "type": "function",
                 "function": {
@@ -793,8 +872,8 @@ pub fn tool_definitions() -> Vec<Value> {
                 }
             }));
         }
-        let has_own = |n: &str| st.tools.iter().any(|(t, _, _)| t == n);
-        let (want_res, want_prompts) = (st.caps.0, st.caps.1);
+        let has_own = |n: &str| b.tools.iter().any(|(t, _, _)| t == n);
+        let (want_res, want_prompts) = (b.caps.0, b.caps.1);
         for name in SYNTH_TOOLS {
             let wanted = match name {
                 "list_resources" | "read_resource" => want_res,
@@ -802,21 +881,26 @@ pub fn tool_definitions() -> Vec<Value> {
                 _ => false,
             };
             if wanted && !has_own(name) {
-                out.push(synth_def(srv, name));
+                out.push(synth_def(&srv, name));
             }
         }
     }
     out
 }
 
-/// 公开：各 server 的资源/提示词清单（设置面板展示用）。
+/// 公开：各 server 的资源/提示词清单（设置面板展示用；只读快照）。
 pub fn catalogs() -> std::collections::HashMap<String, (Vec<String>, Vec<String>)> {
-    let m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-    m.iter()
-        .map(|(name, st)| {
-            let res: Vec<String> = st.resources.iter().map(|(uri, n, _)| if n.is_empty() { uri.clone() } else { format!("{n} ({uri})") }).collect();
-            let prompts: Vec<String> = st.prompts.iter().map(|(n, _)| n.clone()).collect();
-            (name.clone(), (res, prompts))
+    all_managed()
+        .into_iter()
+        .map(|(name, ms)| {
+            let b = ms.brief();
+            let res: Vec<String> = b
+                .resources
+                .iter()
+                .map(|(uri, n, _)| if n.is_empty() { uri.clone() } else { format!("{n} ({uri})") })
+                .collect();
+            let prompts: Vec<String> = b.prompts.iter().map(|(n, _)| n.clone()).collect();
+            (name, (res, prompts))
         })
         .collect()
 }
@@ -833,62 +917,63 @@ pub async fn call_tool(full_name: &str, args_json: &str) -> Result<String, Strin
     if SYNTH_TOOLS.contains(&tool.as_str()) {
         return call_resource_or_prompt(&srv, &tool, args).await;
     }
+    let ms = managed(&srv).ok_or_else(|| format!("未知 server: {srv}"))?;
 
     // 阻塞 IO 丢进 blocking 线程池；外层 timeout 到点放弃（残留行由 id 过滤自愈）
-    let full = full_name.to_string();
     let fut = tokio::task::spawn_blocking(move || {
-        let mut m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-        let st = m.get_mut(&srv).ok_or_else(|| format!("未知 server: {srv}"))?;
-        ensure_online(st)?;
-        let req = json!({
-            "jsonrpc": "2.0", "id": st.next_id, "method": "tools/call",
-            "params": { "name": tool, "arguments": args }
-        });
-        let id = st.next_id;
-        st.next_id += 1;
-        let resp = rpc_round(st, &req, Some(id), 120_000)?;
-        // 拼接 content 里全部 text 段
-        let mut texts: Vec<String> = Vec::new();
-        let mut is_err = false;
-        if let Some(arr) = resp.get("content").and_then(Value::as_array) {
-            for c in arr {
-                if c.get("type").and_then(Value::as_str) == Some("text")
-                    && let Some(t) = c.get("text").and_then(Value::as_str) {
-                        texts.push(t.to_string());
-                    }
+        let mut st = ms.state.lock().unwrap_or_else(|e| e.into_inner());
+        let out = (|| -> Result<String, String> {
+            ensure_online(&mut st)?;
+            let req = json!({
+                "jsonrpc": "2.0", "id": st.next_id, "method": "tools/call",
+                "params": { "name": tool, "arguments": args }
+            });
+            let id = st.next_id;
+            st.next_id += 1;
+            let resp = rpc_round(&mut st, &req, Some(id), 120_000)?;
+            // 拼接 content 里全部 text 段
+            let mut texts: Vec<String> = Vec::new();
+            let mut is_err = false;
+            if let Some(arr) = resp.get("content").and_then(Value::as_array) {
+                for c in arr {
+                    if c.get("type").and_then(Value::as_str) == Some("text")
+                        && let Some(t) = c.get("text").and_then(Value::as_str) {
+                            texts.push(t.to_string());
+                        }
+                }
             }
-        }
-        if resp.get("isError").and_then(Value::as_bool) == Some(true) {
-            is_err = true;
-        }
-        if texts.is_empty() {
-            texts.push(String::new());
-        }
-        let joined = texts.join("\n");
-        if is_err {
-            Err(format!("MCP 工具报告失败: {joined}"))
-        } else {
-            Ok(joined)
-        }
+            if resp.get("isError").and_then(Value::as_bool) == Some(true) {
+                is_err = true;
+            }
+            if texts.is_empty() {
+                texts.push(String::new());
+            }
+            let joined = texts.join("\n");
+            if is_err {
+                Err(format!("MCP 工具报告失败: {joined}"))
+            } else {
+                Ok(joined)
+            }
+        })();
+        // 调用可能改变了 online/tools（自动重连），快照要跟上
+        ms.publish(&st);
+        out
     });
     match tokio::time::timeout(std::time::Duration::from_secs(125), fut).await {
         Ok(r) => r.map_err(|e| format!("MCP 调用任务失败: {e}"))?,
         Err(_) => Err("MCP 调用超时（120s）".into()),
     }
-    .inspect(|_r| {
-        let _ = &full;
-    })
 }
 
-/// 进程存活自检：把已退出的 server 标记离线。调用方须已持有管理器锁（status() 内用）。
 /// resources / prompts 合成工具的本地实现（阻塞 IO 交给 blocking 线程池，超时 60s）。
 async fn call_resource_or_prompt(srv: &str, tool: &str, args: Value) -> Result<String, String> {
     let srv = srv.to_string();
     let tool = tool.to_string();
+    let ms = managed(&srv).ok_or_else(|| format!("未知 server: {srv}"))?;
     let fut = tokio::task::spawn_blocking(move || -> Result<String, String> {
-        let mut m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-        let st = m.get_mut(&srv).ok_or_else(|| format!("未知 server: {srv}"))?;
-        ensure_online(st)?;
+        let mut st = ms.state.lock().unwrap_or_else(|e| e.into_inner());
+        let out = (|| -> Result<String, String> {
+        ensure_online(&mut st)?;
         let rpc = |st: &mut ServerState, method: &str, params: Value| -> Result<Value, String> {
             let id = st.next_id;
             st.next_id += 1;
@@ -898,7 +983,7 @@ async fn call_resource_or_prompt(srv: &str, tool: &str, args: Value) -> Result<S
         match tool.as_str() {
             "list_resources" => {
                 if st.resources.is_empty() {
-                    let resp = rpc(st, "resources/list", json!({}))?;
+                    let resp = rpc(&mut st, "resources/list", json!({}))?;
                     st.resources = parse_resource_list(&resp);
                 }
                 if st.resources.is_empty() {
@@ -915,7 +1000,7 @@ async fn call_resource_or_prompt(srv: &str, tool: &str, args: Value) -> Result<S
             }
             "read_resource" => {
                 let uri = args.get("uri").and_then(Value::as_str).ok_or("缺少 uri")?;
-                let resp = rpc(st, "resources/read", json!({ "uri": uri }))?;
+                let resp = rpc(&mut st, "resources/read", json!({ "uri": uri }))?;
                 let mut out = String::new();
                 for c in resp.get("contents").and_then(Value::as_array).cloned().unwrap_or_default() {
                     if let Some(t) = c.get("text").and_then(Value::as_str) {
@@ -936,7 +1021,7 @@ async fn call_resource_or_prompt(srv: &str, tool: &str, args: Value) -> Result<S
             }
             "list_prompts" => {
                 if st.prompts.is_empty() {
-                    let resp = rpc(st, "prompts/list", json!({}))?;
+                    let resp = rpc(&mut st, "prompts/list", json!({}))?;
                     st.prompts = parse_prompt_list(&resp);
                 }
                 if st.prompts.is_empty() {
@@ -952,7 +1037,7 @@ async fn call_resource_or_prompt(srv: &str, tool: &str, args: Value) -> Result<S
             "get_prompt" => {
                 let name = args.get("name").and_then(Value::as_str).ok_or("缺少 name")?;
                 let arguments = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                let resp = rpc(st, "prompts/get", json!({ "name": name, "arguments": arguments }))?;
+                let resp = rpc(&mut st, "prompts/get", json!({ "name": name, "arguments": arguments }))?;
                 let mut out = String::new();
                 for msg in resp.get("messages").and_then(Value::as_array).cloned().unwrap_or_default() {
                     let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
@@ -970,19 +1055,14 @@ async fn call_resource_or_prompt(srv: &str, tool: &str, args: Value) -> Result<S
             }
             other => Err(format!("未知合成工具: {other}")),
         }
+        })();
+        // resources/prompts 缓存可能刚被填充，快照跟上
+        ms.publish(&st);
+        out
     });
     match tokio::time::timeout(std::time::Duration::from_secs(65), fut).await {
         Ok(r) => r.map_err(|e| format!("MCP 调用任务失败: {e}"))?,
         Err(_) => Err("MCP 资源/提示词调用超时（60s）".into()),
-    }
-}
-
-fn reap_dead_locked(m: &mut HashMap<String, ServerState>) {
-    for st in m.values_mut() {
-        if let Some(child) = st.child.as_mut()
-            && let Ok(Some(_)) = child.try_wait() {
-                st.reset_proc();
-            }
     }
 }
 
@@ -1517,7 +1597,7 @@ data: \"result\":{\"n\":7}}";
         let e = ensure_online_by_name("deadhttp").expect_err("连不上必须报错");
         assert!(e.starts_with("initialize 失败"), "错误串应指明握手失败: {e}");
         let m = mgr().lock().unwrap_or_else(|e| e.into_inner());
-        assert!(!m.get("deadhttp").unwrap().online, "失败后不得留在「在线」态");
+        assert!(!m.get("deadhttp").unwrap().brief().online, "失败后不得留在「在线」态");
     }
 
     /// 工具定义顺序必须确定：manager 是 HashMap（迭代顺序每进程随机），而 tools 数组
@@ -1539,11 +1619,11 @@ data: \"result\":{\"n\":7}}";
                 ..Default::default()
             };
             for srv in ["zeta", "alpha", "mid"] {
-                m.insert(srv.to_string(), srv_state(srv, true, true));
+                m.insert(srv.to_string(), ManagedServer::new(srv_state(srv, true, true)));
             }
             // 停用/离线的必须仍然被过滤（排序不能把过滤规则绕掉）
-            m.insert("aaa_offline".to_string(), srv_state("off", false, true));
-            m.insert("bbb_disabled".to_string(), srv_state("dis", true, false));
+            m.insert("aaa_offline".to_string(), ManagedServer::new(srv_state("off", false, true)));
+            m.insert("bbb_disabled".to_string(), ManagedServer::new(srv_state("dis", true, false)));
         }
         let defs = tool_definitions();
         let names: Vec<&str> = defs
@@ -1555,5 +1635,38 @@ data: \"result\":{\"n\":7}}";
             let mut m = mgr().lock().unwrap_or_else(|e| e.into_inner());
             m.clear();
         }
+    }
+
+    /// 2026-10-30：一个卡住的 server（tools/call 持执行态锁 120s）不许把
+    /// risk_for / tool_definitions（异步 worker 上每一步审批都调）一起堵死。
+    #[test]
+    fn slow_server_does_not_block_risk_or_tool_definitions() {
+        let _g = test_lock();
+        let cfg: McpServerCfg = serde_json::from_value(json!({ "name": "slowmcp", "enabled": true }))
+            .expect("最小 JSON 可反序列化");
+        let mut st = ServerState { cfg: Some(cfg), online: true, ..Default::default() };
+        st.tools = vec![("slowtool".into(), "d".into(), json!({"type":"object"}))];
+        {
+            let mut m = mgr().lock().unwrap_or_else(|e| e.into_inner());
+            m.clear();
+            m.insert("slowmcp".into(), ManagedServer::new(st));
+        }
+        let ms = managed("slowmcp").expect("刚插入的 server");
+        // 模拟 tools/call 正持锁跑长 rpc
+        let held = ms.state.lock().unwrap_or_else(|e| e.into_inner());
+        let t = std::time::Instant::now();
+        assert_eq!(risk_for("mcp__slowmcp__slowtool"), Some(1), "风险判定只看快照");
+        let names: Vec<String> = tool_definitions()
+            .iter()
+            .filter_map(|d| d["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.contains(&"mcp__slowmcp__slowtool".to_string()), "工具清单也只看快照: {names:?}");
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(200),
+            "快照读必须毫秒级返回，实际 {:?}",
+            t.elapsed()
+        );
+        drop(held);
+        mgr().lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }

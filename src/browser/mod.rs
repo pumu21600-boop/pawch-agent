@@ -354,6 +354,13 @@ fn now_ms() -> u64 {
 static SESSION: Mutex<Option<Arc<BrowserSession>>> = Mutex::const_new(None);
 static REAPER: OnceLock<()> = OnceLock::new();
 
+/// 只移除「全局登记仍是它」的会话（避免把别的线程刚重建的新会话误杀）。
+/// 返回被摘下的句柄，kill 由调用方在锁外做——持锁杀进程会把慢操作带进全局锁。
+async fn take_session_if_current(s: &Arc<BrowserSession>) -> Option<Arc<BrowserSession>> {
+    let mut g = SESSION.lock().await;
+    if g.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, s)) { g.take() } else { None }
+}
+
 fn log(kind: &str, extra: Value) {
     observability::event(EventType::State, {
         let mut v = json!({ "kind": kind });

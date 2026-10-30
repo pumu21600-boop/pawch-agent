@@ -1,22 +1,39 @@
 use super::*;
 
 pub(crate) async fn current_session() -> Result<Arc<BrowserSession>, String> {
-    let mut guard = SESSION.lock().await;
+    // 2026-10-30：锁内只取快照，探活/摘死页都在锁外——全局 SESSION 锁不再跨网络 await
+    // （否则一个卡死的页面让所有 browser 工具排队）。
+    let Some(s) = SESSION.lock().await.clone() else {
+        return Err("浏览器未打开：先打开一个网页".into());
+    };
     // 先自愈：壳重启后旧会话里的 tab 可能全死了，不清就会把僵尸 tab 给出去
-    if let Some(s) = guard.as_ref() {
-        if browser_alive(s.port).await {
-            let _ = reap_dead_tabs(&mut guard).await;
-        } else {
-            log("browser.stale", json!({}));
-            if let Some(dead) = guard.take() {
-                kill_child(&dead);
-            }
+    if !browser_alive(s.port).await {
+        log("browser.stale", json!({}));
+        if let Some(dead) = take_session_if_current(&s).await {
+            kill_child(&dead);
         }
+        return Err("浏览器未打开：先打开一个网页".into());
     }
-    match guard.as_ref() {
-        Some(s) => Ok(s.clone()),
-        None => Err("浏览器未打开：先打开一个网页".into()),
+    let dead: Vec<String> = s
+        .tabs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|t| !t.cdp.is_alive())
+        .map(|t| t.id.clone())
+        .collect();
+    for id in &dead {
+        close_tab(&s, id).await;
     }
+    if s.tabs.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+        // 全死：回收旧会话后按原语义重建一个（工具调用拿到可用会话，而不是报错）
+        log("browser.stale", json!({ "reason": "tabs-dead" }));
+        if let Some(dead_session) = take_session_if_current(&s).await {
+            kill_child(&dead_session);
+        }
+        return ensure_session().await;
+    }
+    Ok(s)
 }
 
 /// 页面状态（隔离世界求值 + 导航历史）。
