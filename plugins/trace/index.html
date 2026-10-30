@@ -72,12 +72,22 @@
       * {
         box-sizing: border-box;
       }
+      html,
+      body {
+        height: 100%;
+      }
       body {
         margin: 0;
         padding: 12px 14px;
         font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif;
         background: var(--bg);
         color: var(--fg);
+        /* 2026-10-30 用户实锤「时间线下面那片空间也要用上」：插件文档原先只有内容高，
+           iframe 比内容高出的部分全是面板底色（一片黑）。改成撑满 iframe 的 flex 列，
+           列表区吃剩余高度并自己滚。 */
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
       }
       .head {
         display: flex;
@@ -110,6 +120,17 @@
         font-size: 13px;
         text-align: center;
         padding: 24px 0;
+      }
+      /* 列表容器 = 撑满面板剩余高度的那一块；没有任务时（.empty）顺便居中 */
+      #body {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+      }
+      #body.empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
       .note {
         font-size: 12px;
@@ -183,8 +204,8 @@
         display: flex;
         flex-direction: column;
         padding: 6px 10px 10px;
-        max-height: 52vh;
-        overflow-y: auto;
+        /* 原 max-height: 52vh：面板比视口高时展开的任务事件列表只到半截，下面一片黑。
+           改成不设上限——由外层 #body 统一撑满+滚动（2026-10-30 用户实锤）。 */
       }
       .ev {
         display: flex;
