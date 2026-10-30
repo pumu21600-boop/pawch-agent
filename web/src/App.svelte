@@ -2841,7 +2841,12 @@
     if (!msg && atts.length === 0 && convs.length === 0) return;
     const key = curKey();
     input = '';
-    resetComposerHeight(); // F4：发送后清空是程序化赋值，不触发 input 事件，高度得手动回收
+    // F4：发送后清空是程序化赋值，不触发 input 事件，高度得手动回收。
+    // **必须先 await tick()**：DOM 的 value 要等 tick 才刷成空，不等就量高度，
+    // 量到的是清空前的长内容——框停在半截高（用户实锤「长消息发出去输入框不收回」）。
+    // 插件 session.create 预填路径（下方 bridge）同一个坑，那边早有 await tick()。
+    await tick();
+    resetComposerHeight();
     pendingAttachments = [];
     pendingConvs = [];
     if (streams[key]) {
