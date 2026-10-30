@@ -439,6 +439,10 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
     let guard_tx = tx.clone();
     let guard_session = session_id.clone();
     tokio::spawn(async move {
+        // 取消登记在 handler 入口已占位。守卫必须在**任务体第一行**就接管——放在
+        // 任务体内部的话，之前任何一处 panic 都会带着仍然登记着的会话一起 unwind，
+        // 留下「永远在跑」的僵尸（2026-10-30 真机 panic 自检实锤）。
+        let initial_run = CancelRun::from_flag(cancel_registry.clone(), &guard_session, run_flag);
         run_turn_guarded(
             &guard_session,
             |payload| {
@@ -464,8 +468,9 @@ pub(super) async fn chat(State(state): State<AppState>, Json(req): Json<ChatRequ
         // D2：本轮取消标志（会话级）——新会话不再复位别人的标志，停止只停本会话。
         // N1：标志已在进入 handler 时占位登记（同会话并发在门口就 409）。
         // 守卫在任务结束（含提前 return / panic）时注销登记，不留「永远在跑」的僵尸会话。
-        // M2：run/cancel 可重绑——收尾时会先注销占位、再取队列续跑一轮
-        let mut run = CancelRun::from_flag(cancel_registry.clone(), &session_id, run_flag);
+        // M2：run/cancel 可重绑——收尾时会先注销占位、再取队列续跑一轮。
+        // 初始守卫在 spawn 外层创建（见上），这里直接接管，保证任务体任何位置 panic 都注销。
+        let mut run = initial_run;
         let mut cancel = run.flag.clone();
         // 摘要槽：Summary 事件写入，Snapshot 落盘时随会话持久化
         let summary_slot: Arc<std::sync::Mutex<Option<String>>> =
