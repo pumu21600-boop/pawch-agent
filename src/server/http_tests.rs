@@ -1,0 +1,156 @@
+//! HTTP 层契约测试（2026-10-30）。
+//!
+//! 本仓是 **bin-only crate**（没有 lib.rs），`tests/*.rs` 集成测试够不到内部模块，
+//! 所以这些用例放在 crate 内：用 `tower::ServiceExt::oneshot` 直接打 `server::router`，
+//! 不起真服务器、不碰真端口。
+//!
+//! 纪律（ROADMAP 坑 19/23）：全局单例多（LEDGER / 插件目录 / 工作区），断言只用
+//! 本用例唯一的临时目录，不依赖别的用例留下的干净态。
+
+use super::*;
+
+use axum::body::Body;
+use http_body_util::BodyExt;
+use tower::ServiceExt;
+
+/// 每个用例一个隔离的应用根（会话/记忆/日志都写这里）。
+fn test_root(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("agent-http-{}-{}", tag, uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// 构造一个最小可用的 AppState（全部默认配置 + 临时目录）。
+fn test_state(root: &std::path::Path) -> AppState {
+    // logger 是全局 OnceLock：router 的「未构建前端」分支会调 observability::debug，
+    // 未初始化会 panic。先装一个（已被别的用例占用也无妨）。
+    let _ = observability::init(&root.join("logs"), "agent.jsonl", format!("http-{}", uuid::Uuid::new_v4()));
+    let mem_cfg = Arc::new(crate::config::MemoryConfig::default());
+    let memory = Arc::new(std::sync::RwLock::new(Arc::new(crate::memory::Memory::open(root, &mem_cfg))));
+    AppState {
+        gateway: Arc::new(Gateway::new()),
+        cancel: Arc::new(CancelRegistry::new()),
+        steer: Arc::new(crate::core::steer::SteerQueue::new()),
+        settings: Arc::new(std::sync::RwLock::new(Settings::default())),
+        settings_write: Arc::new(std::sync::Mutex::new(())),
+        agent_cfg: Arc::new(crate::config::AgentConfig::default()),
+        sandbox_cfg: Arc::new(crate::config::SandboxConfig::default()),
+        context_cfg: Arc::new(crate::config::ContextConfig::default()),
+        recovery_cfg: Arc::new(crate::config::RecoveryConfig::default()),
+        system_prompt: Arc::new("测试系统提示".into()),
+        prompt_path: Arc::new(root.join("system.md")),
+        session: Arc::new(crate::session::SessionManager::new(root)),
+        log_dir: Arc::new(root.to_path_buf()),
+        memory,
+        mem_cfg,
+        approvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        approval_meta: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        approved_scopes: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        approval_mode: Arc::new(std::sync::RwLock::new("auto".into())),
+        session_approval: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        roles_cfg: Arc::new(crate::config::RolesConfig::default()),
+        gateway_cfg: Arc::new(crate::config::GatewayConfig::default()),
+        subagent_cfg: Arc::new(crate::config::SubagentConfig::default()),
+    }
+}
+
+/// 发一个 GET（带合法 Host；不带 Origin = 非浏览器客户端），返回 (状态码, JSON)。
+async fn get(app: &Router, uri: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .uri(uri)
+        .header("host", "127.0.0.1:5173")
+        .body(Body::empty())
+        .expect("构造请求");
+    let resp = app.clone().oneshot(req).await.expect("router 不应崩溃");
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.expect("读响应体").to_bytes();
+    let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+fn app(root: &std::path::Path) -> Router {
+    // 指向一个不存在的 dist：router 走内置冒烟页分支，正好避开静态文件
+    router(test_state(root), root.join("no-dist"))
+}
+
+#[tokio::test]
+async fn version_route_has_expected_shape() {
+    let root = test_root("version");
+    let (status, v) = get(&app(&root), "/api/version").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["name"], json!(env!("CARGO_PKG_NAME")));
+    assert_eq!(v["version"], json!(env!("CARGO_PKG_VERSION")));
+    assert!(v["root"].is_string(), "root 必须是字符串: {v}");
+    assert!(v["exe"].is_string(), "exe 必须是字符串: {v}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn sessions_list_and_missing_session_are_stable() {
+    let root = test_root("sessions");
+    let app = app(&root);
+    let (status, v) = get(&app, "/api/sessions").await;
+    assert_eq!(status, StatusCode::OK, "会话列表: {v}");
+    assert!(v["project"].is_string(), "project 应为字符串: {v}");
+    assert!(v["sessions"].is_array(), "sessions 应为数组: {v}");
+    // 不存在的会话：契约是 200 + 空消息，而不是 500/404（前端靠它决定「新对话」）
+    let (status, v) = get(&app, "/api/session?id=definitely-not-exist").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["messages"], json!([]), "不存在的会话应回空消息: {v}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn usage_report_has_totals_and_empty_ledger_is_ok() {
+    let root = test_root("usage");
+    let (status, v) = get(&app(&root), "/api/usage?group=model&range=all").await;
+    assert_eq!(status, StatusCode::OK, "用量报表: {v}");
+    assert_eq!(v["group"], json!("model"));
+    assert!(v["rows"].is_array(), "rows 应为数组: {v}");
+    assert!(v["totals"].is_object(), "totals 应为对象: {v}");
+    assert!(v["totals"]["cost_usd"].is_number(), "total cost 应为数字: {v}");
+    assert!(v["spend_total_usd"].is_number(), "累计花费应为数字: {v}");
+    assert!(v["priced"].is_boolean(), "priced 应为布尔: {v}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn plugins_and_browser_state_routes_are_alive() {
+    let root = test_root("plugins");
+    let app = app(&root);
+    let (status, v) = get(&app, "/api/plugins").await;
+    assert_eq!(status, StatusCode::OK, "插件清单: {v}");
+    assert!(v["plugins"].is_array(), "plugins 应为数组: {v}");
+    assert!(v["dir"].is_string(), "dir 应为字符串: {v}");
+    // 没有浏览器会话时必须是「running:false + 空 tabs」，且不能被能力闸误拦
+    let (status, v) = get(&app, "/api/browser/state").await;
+    assert_eq!(status, StatusCode::OK, "浏览器状态: {v}");
+    assert_eq!(v["running"], json!(false));
+    assert!(v["tabs"].is_array());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn non_loopback_host_is_rejected_with_human_message() {
+    let root = test_root("guard");
+    let app = app(&root);
+    let req = Request::builder()
+        .uri("/api/version")
+        .header("host", "evil.example.com")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.expect("router 不应崩溃");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("本机来源"), "403 文案要是人话: {text}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn unknown_api_route_is_404_not_html() {
+    let root = test_root("404");
+    let (status, _v) = get(&app(&root), "/api/definitely-not-a-route").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "未知 API 必须是 404，不能掉进 SPA 兜底");
+    let _ = std::fs::remove_dir_all(&root);
+}

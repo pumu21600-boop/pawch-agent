@@ -60,6 +60,10 @@ mod usage;
 pub(crate) mod workspace; // settings 工具的 workspace 动作复用 canon_workspace/apply_workspace
 mod webpanel;
 
+/// HTTP 层契约测试（2026-10-30）：bin-only crate，放 crate 内用 oneshot 打 router。
+#[cfg(test)]
+mod http_tests;
+
 /// GET /api/computer/state —— 操作电脑状态（最近截图 + 动作流水；UI 面板用）。
 /// 截图内联图只走 SSE 实时事件，这里给的是「重开页面后也能回看」的落盘面。
 pub(super) async fn computer_state() -> Json<Value> {

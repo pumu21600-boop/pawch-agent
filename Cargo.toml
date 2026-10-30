@@ -57,3 +57,8 @@ windows-sys = { version = "0.52", features = [
   "Win32_Graphics_Gdi",
   "Win32_Storage_FileSystem",
 ] }
+
+[dev-dependencies]
+# HTTP 层契约测试（src/server/http_tests.rs）：直接 oneshot 打 router，不起真端口
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
