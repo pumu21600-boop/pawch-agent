@@ -1373,33 +1373,57 @@
   /// 思考框自动跟随：内容增长时贴底；用户上滚 → 停（followchange 通知界面）；
   /// 滚回最底 → 恢复。只在流式思考（active=true）时启动——历史里展开一段长思考
   /// 应该从顶部读起，不能一打开就跳到底。
+  /// 2026-10-31 修「上滑被强行拽回」：靠「是否贴底」判意图在流式下永远输——
+  /// MutationObserver 每次新内容都把位置拽回底部，scroll 事件到达时几何上总在
+  /// 底部。改为滚轮/触摸一出手立即停跟（同步，先于任何拽回），scroll 事件只按
+  /// 方向判（向上=用户、向下到底=恢复），跟随拽回不误伤。
   function thinkFollow(node, active = true) {
     let following = true;
     let live = !!active;
+    let lastTop = node.scrollTop;
     const nearBottom = () => node.scrollHeight - node.scrollTop - node.clientHeight < 24;
-    const onScroll = () => {
-      const nf = nearBottom();
-      if (nf !== following) {
-        following = nf;
-        node.dispatchEvent(new CustomEvent('followchange', { detail: { following: nf } }));
-      }
+    const setFollowing = (nf) => {
+      if (nf === following) return;
+      following = nf;
+      node.dispatchEvent(new CustomEvent('followchange', { detail: { following: nf } }));
     };
+    const stick = () => {
+      node.scrollTop = node.scrollHeight;
+      lastTop = node.scrollTop;
+    };
+    const onScroll = () => {
+      const t = node.scrollTop;
+      if (t < lastTop - 1) setFollowing(false); // 上移=用户意图（跟随只会向下拽）
+      else if (nearBottom()) setFollowing(true); // 滚回底部恢复跟随
+      lastTop = t;
+    };
+    const onWheel = (e) => {
+      if (e.deltaY < 0) setFollowing(false);
+    };
+    const onTouchStart = () => setFollowing(false);
     const mo = new MutationObserver(() => {
-      if (live && following) node.scrollTop = node.scrollHeight;
+      if (live && following) stick();
     });
     node.addEventListener('scroll', onScroll, { passive: true });
+    node.addEventListener('wheel', onWheel, { passive: true });
+    node.addEventListener('touchstart', onTouchStart, { passive: true });
     mo.observe(node, { childList: true, characterData: true, subtree: true });
-    if (live) node.scrollTop = node.scrollHeight;
+    if (live) stick();
     return {
       update(next) {
-        live = !!next;
-        if (live) {
+        const nl = !!next;
+        if (nl && !live) {
+          // 重新进入流式（新一轮思考）：恢复跟随并贴底
           following = true;
-          node.scrollTop = node.scrollHeight;
+          setFollowing(true);
+          stick();
         }
+        live = nl;
       },
       destroy() {
         node.removeEventListener('scroll', onScroll);
+        node.removeEventListener('wheel', onWheel);
+        node.removeEventListener('touchstart', onTouchStart);
         mo.disconnect();
       },
     };
@@ -1693,7 +1717,11 @@
         if (s.agentTouched <= webAgentSeen) return; // 这次触碰已响应过
         webAgentSeen = s.agentTouched;
         rightPanelOpen = true;
-        if (rpTab !== 'web') rpTab = 'web';
+        // 「打开侧栏不自己冒面板」（2026-10-30）之后默认 rpTabs=[]——这里只设 rpTab='web'
+        // 会被「可见页签为空→回选择页」的钳制反应式立刻打回 ''，浏览器面板永远出不来
+        // （2026-10-31 用户实锤「只弹右侧栏没开浏览器面板」）。自动唤起=把 web 页签
+        // 真加进列表再激活（addRpTab 幂等：已在列表就只激活）。
+        addRpTab({ key: 'web', kind: 'web', title: '网页' });
         if (s.agentTab && s.agentTab !== webActiveId && (s.tabs || []).some((t) => t.id === s.agentTab)) {
           webActiveId = s.agentTab;
           const act = (s.tabs || []).find((t) => t.id === webActiveId);
@@ -6108,6 +6136,13 @@
               </span>
             {/if}
             <div class="msg-stack">
+            {#each m.steerMarkers || [] as sm}
+              <!-- 重启 rebuild 后挂回轮上的引导标记：不把同一轮拆成两半（2026-10-31） -->
+              <div class="steer-line" title="引导消息：不打断当时的对话，静默并入了那一轮">
+                <span class="steer-line-badge">已引导</span>
+                <span class="steer-line-text">{sm.content}</span>
+              </div>
+            {/each}
             <div class="bubble asst-bubble">
               {#if m.streaming && m.workStartedAt}
                 <div class="turn-bar live">
@@ -10267,7 +10302,8 @@
   }
   .think-jump {
     position: absolute;
-    right: 8px;
+    /* 让出 .think-text 自身滚动条的宽度（~12px），不然回到底部按钮压在滑条上（2026-10-31 实锤） */
+    right: 18px;
     bottom: 12px;
     display: grid;
     place-items: center;

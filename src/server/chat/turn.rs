@@ -158,7 +158,13 @@ pub(crate) async fn turn_system_prompt(state: &AppState, primary: &gateway::Chan
         })
         .unwrap_or_default();
     let selfop = selfop_policy(state);
-    format!("{prompt}{identity_fact}{memory_md}{workspace_hint}{skills_index}{ui_index}{selfop}")
+    // 段序纪律（2026-10-31 缓存暖机优化）：稳定段在前、易变段垫尾。
+    // memory_md（自动记忆，agent 每写一条就变）与 identity_fact（身份探测缓存，
+    // 问过一次身份才出现/回滚清缓存后消失）是 system 里仅有的两个轮间变量——
+    // 曾插在中段，任何一条变化都把「它之后」的 workspace/skills/tools 稳定区
+    // 全部作废（用户实锤：长会话前段命中率爬得慢、成本压不下去）。垫尾后变化
+    // 只作废它自己那一小段；system 的稳定前缀从第一轮起就跨会话可命中。
+    format!("{prompt}{workspace_hint}{skills_index}{ui_index}{selfop}{memory_md}{identity_fact}")
 }
 
 /// 新会话第一轮的「项目现状」brief（上一条同项目会话 + 工作区未提交改动）。

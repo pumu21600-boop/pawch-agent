@@ -856,7 +856,7 @@ pub(crate) fn timeout_error_text(e: &str, diag: &ProxyDiagnosis) -> String {
         if retry_ok {
             "可以重试一次；仍不行就 close_browser 后重新打开。"
         } else {
-            "原因已定位：本机代理客户端在运行但系统代理开关是关闭的（浏览器跟随系统代理=直连），重试和 close_browser 重开都救不了——不要再重试，直接结束本轮向用户说明：打开代理客户端的「系统代理」或 TUN 模式即可，改好后会让你重试。"
+            "原因已定位：本机代理客户端在运行但系统代理开关是关闭的（浏览器跟随系统代理=直连），重试和 close_browser 重开都救不了——不要再重试，直接结束本轮向用户说明：打开代理客户端的「系统代理」或 TUN 模式即可，改好后会让你重试。注意这只影响外网：本地地址（127.0.0.1/localhost/工作区文件）不走代理，照常可开，别因此放弃内置浏览器。"
         },
         diagnosis_hint(diag),
     )
@@ -879,7 +879,43 @@ async fn chrome_error_detail(tab: &WebTab) -> String {
     if let Some(code) = http_error_code(tab).await {
         return http_error_text(code);
     }
-    chrome_error_message("chrome-error://chromewebdata/")
+    let target = error_target_url(tab).await;
+    chrome_error_text(target.as_deref().unwrap_or("chrome-error://chromewebdata/"), &probe_system_proxy())
+}
+
+/// 从导航历史里捞出错页**之前**的目标地址（失败诊断分流用：本地地址与外网的
+/// 人话完全不同）。历史里只有 chrome-error 一条时返回 None，走通用文案。
+async fn error_target_url(tab: &WebTab) -> Option<String> {
+    let hist = tab.cdp.call("Page.getNavigationHistory", json!({})).await.ok()?;
+    let entries = hist.get("entries")?.as_array()?;
+    entries
+        .iter()
+        .rev()
+        .filter_map(|e| e.get("url")?.as_str())
+        .find(|u| !u.starts_with("chrome-error://"))
+        .map(String::from)
+}
+
+/// 本地地址判定（错误文案分流用）：127.0.0.1/localhost/[::1]/file://。
+/// 这些地址不走代理，失败也不该跑代理诊断——2026-10-31 真机实锤：agent 起的
+/// 本地端口没服务在听，报「系统代理开关关闭」把它带去查代理，白烧十几轮。
+pub(crate) fn is_local_url(url: &str) -> bool {
+    let u = url.trim();
+    if u.starts_with("file://") {
+        return true;
+    }
+    let rest = match u.split_once("://") {
+        Some((scheme, r)) if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") => r,
+        _ => return false,
+    };
+    let host = rest.split('/').next().unwrap_or("");
+    // [::1]:8080 → 剥方括号取 ::1；普通 host:port → 剥端口（两个分支顺序不能反）
+    let bare = if let Some(h) = host.strip_prefix('[') {
+        h.split(']').next().unwrap_or(h)
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    matches!(bare.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "::1")
 }
 
 /// 读错误页正文里的 HTTP 状态码（Chromium 的 4xx/5xx 错误页正文含 "HTTP ERROR 404"，
@@ -939,14 +975,18 @@ pub(crate) async fn chrome_error_note_wait(tab: &WebTab, max_ms: u64) -> Option<
 
 /// chrome-error 页的人话（纯函数可单测）。确诊代理误配时点名「重开也没用」，
 /// 别让模型照旧文案去 close_browser 折腾一轮。
-pub(crate) fn chrome_error_message(url: &str) -> String {
-    chrome_error_text(url, &probe_system_proxy())
-}
-
 pub(crate) fn chrome_error_text(url: &str, diag: &ProxyDiagnosis) -> String {
+    // 本地地址连不上 = 端口没服务在听，跟代理无关——别把模型带去查代理
+    //（2026-10-31 真机实锤：本地端口拒连被报成「系统代理开关关闭」，agent 白烧十几轮）
+    if is_local_url(url) {
+        return format!(
+            "访问失败：本地地址（{url}）连不上——这个端口本机没有服务在监听（连接被拒），就到这一步为止。\
+             不要再重试同一地址：先确认服务是否真的启动、端口是否写对；预览工作区文件优先用工作区接口的本地地址，别自己另起服务。"
+        );
+    }
     let diagnosed = matches!(diag, ProxyDiagnosis::ClientAliveSwitchOff(_));
     let fix = if diagnosed {
-        "原因已定位：本机代理客户端在运行但系统代理开关是关闭的——重试和 close_browser 重开都救不了，直接结束本轮告诉用户：打开代理客户端的「系统代理」或 TUN 模式即可。"
+        "原因已定位：本机代理客户端在运行但系统代理开关是关闭的——重试和 close_browser 重开都救不了，直接结束本轮告诉用户：打开代理客户端的「系统代理」或 TUN 模式即可。注意这只影响外网：本地地址（127.0.0.1/localhost/工作区文件）不走代理，照常可开，别因此放弃内置浏览器。"
     } else {
         "直接把「访问失败」告诉用户；若用户说网络已恢复，先 close_browser 重开浏览器实例再试一次。"
     };

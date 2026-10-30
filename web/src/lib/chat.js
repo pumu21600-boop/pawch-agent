@@ -167,9 +167,27 @@ export function messageParts(m) {
 /// 同一轮连续 assistant 并成一个气泡。落盘一步一条是事实源，展示层合并。
 /// 合并规则：content/thinking 拼接、tools 依序合并、parts 依序拼接并重排 toolIndex、
 /// thinkMs 累加；workMs/stats 取收尾那条；ts/id 留第一条。
+/// 引导消息（steered 用户消息）对合并**透明**（2026-10-31 实锤：引导在会话文件里
+/// 是真 user——模型上下文需要它，落盘不动；但展示层不能让它把同一轮拆成两半）。
+/// 标记攒起来挂到合并后的那轮（steerMarkers）；后面没等到 assistant 的原样保留。
+/// 打断（interrupted）是真用户气泡，照旧拆分。
 export function mergeAssistantRun(list) {
   const out = [];
+  let pending = []; // 待挂靠的引导标记（原样 user 消息）
+  const takeMarkers = () => {
+    const marks = pending.map((s) => ({ ts: s.ts, content: s.content }));
+    pending = [];
+    return marks;
+  };
+  const flushPending = () => {
+    for (const s of pending) out.push(s);
+    pending = [];
+  };
   for (const m of list) {
+    if (m.role === 'user' && m.steered) {
+      pending.push(m);
+      continue;
+    }
     const prev = out[out.length - 1];
     if (m.role === 'assistant' && prev && prev.role === 'assistant') {
       const prevTools = prev.tools || [];
@@ -188,11 +206,16 @@ export function mergeAssistantRun(list) {
         thinkMs: (prev.thinkMs || 0) + (m.thinkMs || 0),
         workMs: m.workMs || prev.workMs,
         stats: m.stats || prev.stats,
+        ...(pending.length ? { steerMarkers: [...(prev.steerMarkers || []), ...takeMarkers()] } : {}),
       };
+    } else if (m.role === 'assistant') {
+      out.push(pending.length ? { ...m, steerMarkers: takeMarkers() } : m);
     } else {
+      flushPending();
       out.push(m);
     }
   }
+  flushPending();
   return out;
 }
 

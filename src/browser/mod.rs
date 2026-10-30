@@ -416,6 +416,24 @@ mod tests {
         assert!(c2.contains("close_browser 重开浏览器实例再试一次"), "{c2}");
     }
 
+    /// 本地地址连不上 = 端口没服务在听，文案不得提代理、不得跑代理诊断
+    /// （2026-10-31 真机实锤：本地端口拒连被报成「系统代理开关关闭」，
+    /// agent 被带去查代理/起服务，白烧十几轮）。
+    #[test]
+    fn local_url_errors_skip_proxy_diagnosis() {
+        assert!(crate::browser::command::is_local_url("http://127.0.0.1:8893/"));
+        assert!(crate::browser::command::is_local_url("http://localhost:5173/api/x"));
+        assert!(crate::browser::command::is_local_url("http://[::1]:8080/"));
+        assert!(crate::browser::command::is_local_url("file:///C:/tmp/a.html"));
+        assert!(!crate::browser::command::is_local_url("https://example.com/"));
+        assert!(!crate::browser::command::is_local_url("http://192.168.1.5:8000/"));
+        let diag = ProxyDiagnosis::ClientAliveSwitchOff("127.0.0.1:7897".into());
+        let t = chrome_error_text("http://127.0.0.1:8893/", &diag);
+        assert!(t.contains("没有服务在监听"), "{t}");
+        assert!(!t.contains("代理"), "本地失败不得提代理：{t}");
+        assert!(t.contains("不要再重试"), "{t}");
+    }
+
     /// HTTP 错误页（4xx/5xx）与网络不通必须分开说：API 端点被浏览器 GET 打出 404 是常态，
     /// 旧文案一律「站点连不上」还附代理诊断，把用户往「坏了」上误导（2026-10-08 实锤：
     /// 面板手动开 api.stepfun.com/step_plan/ 得 404，被当成网络故障）。

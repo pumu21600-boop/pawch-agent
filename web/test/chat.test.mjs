@@ -232,6 +232,46 @@ test('mergeAssistantRun：多步合并成一条，parts 顺序保留、toolIndex
   assert.equal(list.length, 3);
 });
 
+test('mergeAssistantRun：引导(steered)对合并透明，标记挂到轮上；打断照旧拆分', () => {
+  const mk = (id, ts, text, toolIndex = 0) => ({
+    id,
+    role: 'assistant',
+    ts,
+    content: text,
+    tools: [{ name: 'shell', args: '{}' }],
+    parts: [{ type: 'tool', toolIndex, name: 'shell', args: '{}', status: 'ok' }, { type: 'content', text }],
+    workMs: 0,
+  });
+  const steer = { id: 's1', role: 'user', content: '为什么不用内置浏览器', steered: true, ts: 150 };
+  // 引导夹在两条 assistant 中间：不拆，标记挂到合并后的轮
+  const [m] = mergeAssistantRun([mk('a1', 100, '前半。'), steer, mk('a2', 200, '后半。', 1)]);
+  assert.equal(m.id, 'a1');
+  assert.deepEqual(m.parts.map((p) => p.type), ['tool', 'content', 'tool', 'content'], '同一轮不再被引导拆成两半');
+  assert.deepEqual(m.steerMarkers, [{ ts: 150, content: '为什么不用内置浏览器' }]);
+  // 多条引导都收进来
+  const [m2] = mergeAssistantRun([
+    mk('b1', 100, '一。'),
+    steer,
+    { id: 's2', role: 'user', content: '顺便截个图', steered: true, ts: 160 },
+    mk('b2', 200, '二。', 1),
+  ]);
+  assert.equal(m2.steerMarkers.length, 2);
+  // 引导后没有 assistant（轮被取消）：原样保留，不丢
+  const tail = mergeAssistantRun([mk('c1', 100, '完。'), steer]);
+  assert.equal(tail.length, 2);
+  assert.equal(tail[1].steered, true);
+  assert.equal(tail[1].content, '为什么不用内置浏览器');
+  // 引导后跟的是新 user 消息：原样保留在原位
+  const mid = mergeAssistantRun([steer, { role: 'user', content: '正式提问' }, mk('d1', 100, '答。')]);
+  assert.equal(mid.length, 3);
+  assert.equal(mid[0].steered, true);
+  // 打断(interrupted)是真用户气泡：照旧拆分
+  const intr = { id: 'i1', role: 'user', content: '立刻停', interrupted: true, ts: 150 };
+  const split = mergeAssistantRun([mk('e1', 100, '前。'), intr, mk('e2', 200, '后。', 1)]);
+  assert.equal(split.length, 3, 'interrupted 不合并');
+  assert.equal(split[1].interrupted, true);
+});
+
 test('partsFromStoredMessage：思考 → 正文 → 工具，工具 index 从 0 起', () => {
   const parts = partsFromStoredMessage({
     reasoning_content: '想了想',
