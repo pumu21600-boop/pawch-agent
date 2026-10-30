@@ -4088,6 +4088,38 @@
         if (t) t.preview = contentText(m.content).slice(0, 300);
       }
     }
+    return mergeAssistantRun(out);
+  }
+
+  /// 同一轮里的连续 assistant 消息并成一个气泡——对齐流式渲染的形状。
+  ///
+  /// 流式路径是一轮**一个**气泡：turn 开始时建一个 streaming 气泡，这一步那一步的
+  /// tool_call 全往它的 tools 里追加，时间戳也只有一条。落盘却是**一步一条**
+  /// assistant（每步自带 tool_calls/stats），直接重建就得到 N 个气泡、N 条时间戳，
+  /// 工具调用全被隔开——用户实锤「重启前还好好的折叠在一起，重启后每个中间都插一个
+  /// 时间标记」（2026-10-30）。落盘结构不动（每步一条是正确的事实源），只在展示层合并。
+  ///
+  /// 合并规则：连续 assistant（中间没有 user/system 隔断）→ content/thinking 拼接、
+  /// tools 依序合并、thinkMs 累加；workMs/stats 取收尾消息那条（整轮用时与信息卡只在
+  /// 最后一条上）；ts 与 id 留**第一条**的——时间标记一个就够。
+  function mergeAssistantRun(list) {
+    const out = [];
+    for (const m of list) {
+      const prev = out[out.length - 1];
+      if (m.role === 'assistant' && prev && prev.role === 'assistant') {
+        out[out.length - 1] = {
+          ...prev,
+          content: (prev.content || '') + (m.content || ''),
+          thinking: (prev.thinking || '') + (m.thinking || ''),
+          tools: [...(prev.tools || []), ...(m.tools || [])],
+          thinkMs: (prev.thinkMs || 0) + (m.thinkMs || 0),
+          workMs: m.workMs || prev.workMs,
+          stats: m.stats || prev.stats,
+        };
+      } else {
+        out.push(m);
+      }
+    }
     return out;
   }
 
