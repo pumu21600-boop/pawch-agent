@@ -38,3 +38,16 @@ test('表格与列表结构正常', () => {
   const ul = md('- 一\n- 二');
   assert.ok(ul.includes('<ul class="md-ul"><li>一</li><li>二</li></ul>'), ul);
 });
+
+test('模型把 <tool_call> 协议吐成正文时折叠，不铺满屏幕', () => {
+  const html = md(
+    '先说明一下。\n\n<tool_call>\n<function=write_file>\n<parameter=content>\n<!DOCTYPE html>\n</parameter>\n</function>\n</tool_call>\n\n后文还在。'
+  );
+  assert.ok(html.includes('class="md-toolcall"'), html);
+  assert.ok(html.includes('原始工具调用文本'), html);
+  assert.ok(html.includes('后文还在'), html);
+  assert.ok(!/<tool_call>/.test(html), '原始尖括号不能出现（必须转义）');
+  // 没闭合（流式中/历史脏数据）也要能收住
+  const unclosed = md('<tool_call>\n<function=shell>\n');
+  assert.ok(unclosed.includes('class="md-toolcall"'), unclosed);
+});

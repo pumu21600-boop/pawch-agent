@@ -37,6 +37,7 @@ const required = [
   'md-quote',
   'md-hr',
   'md-a',
+  'md-toolcall',
 ];
 const missing = required.filter((k) => !new RegExp(`\\.${k.replace(/-/g, '\\-')}(?![\\w-])`).test(css));
 if (missing.length) {

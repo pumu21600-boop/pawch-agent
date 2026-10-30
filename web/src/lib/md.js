@@ -5,12 +5,21 @@
 // > 引用、--- 分隔线、GFM 表格（| 表头 | + | --- | 分隔行）、[文字](http(s)链接)。链接只放行 http/https，其余协议剥成纯文本。
 export function md(src) {
   if (!src) return '';
+  const escapeHtml = (s) =>
+    String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  // 0) 原始工具调用文本（模型把 <tool_call> 协议当正文吐出来的历史消息）：
+  //    不静默丢，但也不让它铺满一屏——收成一个可展开的「原始工具调用文本」块。
+  const leaks = [];
+  let raw = String(src).replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/g, (m) => {
+    leaks.push(m);
+    return `\n\n\u0002${leaks.length - 1}\u0002\n\n`;
+  });
   // 1) 整体转义（引号也转，防属性注入）
-  let t = String(src)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+  let t = escapeHtml(raw);
   // 2) 围栏代码块（先把代码内容抠出来占位，别被后面的行内规则误伤）
   //    2026-10-30：加代码块头（语言 + 复制按钮）；复制走 content 上的事件委托。
   const blocks = [];
@@ -74,13 +83,19 @@ export function md(src) {
     return `<blockquote class="md-quote">${lines}</blockquote>`;
   });
   // 11) 段落与换行：双换行分段，单换行转 <br>
-  //     占位符（代码块）不能被包进 <p>——否则还原后是 <p><div class="md-codeblock">… 的非法嵌套
+  //     占位符（代码块/折叠块）不能被包进 <p>——否则还原后是 <p><div ...> 的非法嵌套
   t = t
     .split(/\n{2,}/)
-    .map((p) => (p.trim() && !/^<(h[1-6]|ul|ol|pre|hr|blockquote|div|table)\b/i.test(p.trim()) && !/^\u0000\d+\u0000/.test(p.trim()) ? `<p class="md-p">${p.trim()}</p>` : p.trim()))
+    .map((p) => (p.trim() && !/^<(h[1-6]|ul|ol|pre|hr|blockquote|div|table)\b/i.test(p.trim()) && !/^\u0000\d+\u0000/.test(p.trim()) && !/^\u0002\d+\u0002/.test(p.trim()) ? `<p class="md-p">${p.trim()}</p>` : p.trim()))
     .join('');
   t = t.replace(/\n/g, '<br />');
   // 12) 还原占位
-  t = t.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[+i]).replace(/\u0001(\d+)\u0001/g, (_, i) => codes[+i]);
+  t = t
+    .replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[+i])
+    .replace(/\u0001(\d+)\u0001/g, (_, i) => codes[+i])
+    .replace(/\u0002(\d+)\u0002/g, (_, i) => {
+      const code = escapeHtml(leaks[+i] || '');
+      return `<details class="md-toolcall"><summary>原始工具调用文本 · 已折叠</summary><pre>${code}</pre></details>`;
+    });
   return t;
 }

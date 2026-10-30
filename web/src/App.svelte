@@ -9796,6 +9796,36 @@
     font: 12.5px/1.7 Consolas, 'Cascadia Code', monospace;
     white-space: pre;
   }
+  /* 模型把 <tool_call> 协议当正文吐出来的历史消息：折叠成可展开块，不铺满屏幕 */
+  .content :global(.md-toolcall) {
+    margin: 10px 0 14px;
+    border: 1px solid var(--g2);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--g2) 45%, transparent);
+    overflow: hidden;
+  }
+  .content :global(.md-toolcall summary) {
+    padding: 7px 12px;
+    font-size: 12.5px;
+    color: var(--g5);
+    cursor: pointer;
+    user-select: none;
+  }
+  .content :global(.md-toolcall summary:hover) {
+    color: var(--g7);
+  }
+  .content :global(.md-toolcall pre) {
+    margin: 0;
+    padding: 10px 12px;
+    max-height: 320px;
+    overflow: auto;
+    border-top: 1px solid var(--g2);
+    background: var(--g0);
+    color: var(--g5);
+    font: 12px/1.6 Consolas, 'Cascadia Code', monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
   .content :global(.md-quote) {
     margin: 10px 0;
     padding: 2px 14px;
