@@ -2140,25 +2140,36 @@
   async function loadArtifacts() {
     rpLoading = true;
     rpWarn = '';
-    // 产物=整条会话的产出，基线取会话起点（最早检查点），不是最后一个任务的切片
-    const { id: baseline, note } = await resolveBaseline({ sessionFirst: true });
-    if (!baseline) {
-      rpFiles = [];
-      rpArtifactsNote = note || '本任务还没有产物。';
-      rpLoading = false;
-      return;
-    }
-    rpArtifactsNote = '';
+    rpStale = false;
+    rpStaleErr = '';
+    // 2026-10-31 用户拍板「和 ZCode 一样那套」：产物面板**不再用影子基线**——直接看
+    // 工作区真 git 状态（相对 HEAD）。基线过期这类病在设计上就不存在了：你删/挪什么，
+    // 面板如实显示什么；agent 造的新文件走 --others 追加，同样在清单里。
+    // 非 git 工作区才退化到影子基线（git 都没有，只能靠快照）。
+    let usedBaseline = false;
     try {
-      const r = await fetch(`/api/changes?baseline=${encodeURIComponent(baseline)}`).then((x) => x.json());
+      let r = await fetch('/api/changes?origin=workspace').then((x) => x.json());
+      if (r.error && /不在 git 仓库|not a git repository/i.test(String(r.error))) {
+        // 非 git 工作区兜底：退回影子基线（会话起点）
+        const { id: baseline, note } = await resolveBaseline({ sessionFirst: true });
+        if (!baseline) {
+          rpFiles = [];
+          rpArtifactsNote = note || '本任务还没有产物。';
+          rpLoading = false;
+          return;
+        }
+        usedBaseline = true;
+        r = await fetch(`/api/changes?baseline=${encodeURIComponent(baseline)}`).then((x) => x.json());
+      }
       rpFiles = r.files || [];
-      rpWarn = r.warning || '';
-      // 基线过期：清单全是基线残留鬼影，隐藏并给「重拍基线」出口（2026-10-31 用户实锤）
-      rpStale = !!(r.warning && rpFiles.length);
-      if (rpStale) {
-        rpStaleCount = rpFiles.length;
-        rpFiles = [];
-        rpArtifactsNote = '基线已过期，清单已隐藏。';
+      rpWarn = usedBaseline ? r.warning || '' : '';
+      if (usedBaseline) {
+        rpStale = !!(r.warning && rpFiles.length);
+        if (rpStale) {
+          rpStaleCount = rpFiles.length;
+          rpFiles = [];
+          rpArtifactsNote = '基线已过期，清单已隐藏。';
+        }
       }
       if (r.error) rpArtifactsNote = `读取失败: ${r.error}`;
     } catch (e) {
@@ -5829,6 +5840,11 @@
         </button>
         <button class="icon-btn" title="收起侧栏" on:click={() => (sidebarCollapsed = true)}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4.5" width="18" height="15" rx="3.2"/><line x1="9.8" y1="4.5" x2="9.8" y2="19.5"/></svg>
+        </button>
+        <!-- 重新加载界面（铁律 1 配套，2026-10-31）：前端换新构建后点一下丢旧代码。
+             带时间戳强制拉最新入口（assets 带 hash，不受缓存影响）。 -->
+        <button class="icon-btn" title="重新加载界面（前端更新后点这个）" on:click={() => (location.href = location.pathname + '?r=' + Date.now())}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 6"/><path d="M20 5v6h-6"/></svg>
         </button>
       </div>
 
