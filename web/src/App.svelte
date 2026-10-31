@@ -7854,16 +7854,16 @@
     width: 100%;
     height: 40px;
     border-radius: 10px;
-    border: 1px solid var(--g3);
-    background: var(--g1);
-    color: var(--g7);
+    border: none;
+    background: var(--brand);
+    color: var(--brand-ink);
     font-size: 13.5px;
     font-weight: 600;
     cursor: pointer;
+    transition: background 0.15s;
   }
   .new-chat:hover {
-    background: var(--g2);
-    border-color: var(--g4);
+    background: var(--brand-hover);
   }
   .new-chat:disabled {
     opacity: 0.5;
@@ -8084,6 +8084,8 @@
   .conv.active {
     background: var(--g2);
     color: var(--g7);
+    /* 左缘品牌竖条：当前会话一眼可辨（随主题自动适配） */
+    box-shadow: inset 2.5px 0 0 var(--brand);
   }
   .conv-pin {
     width: 15px;
@@ -11355,8 +11357,8 @@
     box-shadow: 0 4px 16px var(--overlay);
   }
   .composer:focus-within {
-    border-color: var(--g4);
-    box-shadow: 0 6px 20px var(--overlay);
+    border-color: color-mix(in srgb, var(--brand) 55%, transparent);
+    box-shadow: 0 6px 22px color-mix(in srgb, var(--brand) 14%, transparent);
   }
   .composer-input {
     display: block;
@@ -11724,6 +11726,9 @@
     justify-content: center;
   }
   .send-btn:hover:not(:disabled) {
+    background: var(--brand-hover);
+  }
+  .send-btn:hover:not(:disabled):not(.stop) {
     background: var(--brand-hover);
   }
   .send-btn:disabled {
