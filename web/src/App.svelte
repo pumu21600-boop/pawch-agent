@@ -500,6 +500,10 @@
       manualBaseline = ''; // 重拍的基线只属于当时的会话/工作区，切走即作废
       rpStale = false;
       rvStale = false;
+      rpStaleClosed = false;
+      rvStaleClosed = false;
+      rpStaleErr = '';
+      rvStaleErr = '';
       if (rpTab === 'git') loadReview();
       else if (rpTab === 'artifacts') loadArtifacts();
     } catch (e) {
@@ -1194,6 +1198,10 @@
   let rvStale = false;
   let rpStaleCount = 0;
   let rvStaleCount = 0;
+  let rpStaleClosed = false; // 用户关掉气泡后本次不再打扰（切会话/工作区即重置）
+  let rvStaleClosed = false;
+  let rpStaleErr = ''; // 重拍失败就地可见（此前藏在看不见的 note 里=用户「点了没用」）
+  let rvStaleErr = '';
   // 用户手动重拍的基线：优先级压过消息流里的旧检查点（会话/工作区切换时清掉）
   let manualBaseline = '';
   // 打开 git 面板并把某个文件展开（产物行「审查」按钮用；变更条撤了，入口只剩产物行）。
@@ -2137,6 +2145,7 @@
       if (rpStale) {
         rpStaleCount = rpFiles.length;
         rpFiles = [];
+        rpArtifactsNote = '基线已过期，清单已隐藏。';
       }
       if (r.error) rpArtifactsNote = `读取失败: ${r.error}`;
     } catch (e) {
@@ -2149,26 +2158,34 @@
   // 手动重拍基线：POST /api/checkpoints 以当前工作区状态为新起点，产物/git 面板回到真实增量
   async function rebaseline() {
     const q = currentSessionId ? `?session=${encodeURIComponent(currentSessionId)}` : '';
+    rpStaleErr = '';
+    rvStaleErr = '';
     try {
       const r = await fetch('/api/checkpoints' + q, { method: 'POST' }).then((x) => x.json());
       if (r.error) {
-        rpArtifactsNote = `重拍基线失败: ${r.error}`;
+        // 失败必须在气泡上就地可见（藏在 note 里=用户「点了没用」的教训）
+        rpStaleErr = `重拍失败: ${r.error}`;
+        rvStaleErr = rpStaleErr;
         return;
       }
       if (!r.ok) {
-        rpArtifactsNote = r.note || '拍不了基线';
+        rpStaleErr = r.note || '拍不了基线';
+        rvStaleErr = rpStaleErr;
         return;
       }
       manualBaseline = r.checkpoint.id;
       rvBaseline = r.checkpoint.id;
       rpStale = false;
       rvStale = false;
+      rpStaleClosed = false;
+      rvStaleClosed = false;
       // 无变更重拍：服务端会带人话（直接以最近检查点为起点），空清单时有处可说
       rpArtifactsNote = r.note || '';
       loadArtifacts();
       if (rpTab === 'git') loadReview();
     } catch (e) {
-      rpArtifactsNote = `重拍基线失败: ${e.message || e}`;
+      rpStaleErr = `重拍失败: ${e.message || e}`;
+      rvStaleErr = rpStaleErr;
     }
   }
 
@@ -3768,6 +3785,10 @@
       manualBaseline = ''; // 重拍的基线只属于当时的会话/工作区，切走即作废
       rpStale = false;
       rvStale = false;
+      rpStaleClosed = false;
+      rvStaleClosed = false;
+      rpStaleErr = '';
+      rvStaleErr = '';
       if (rpTab === 'git') loadReview();
       else if (rpTab === 'artifacts') loadArtifacts();
     } catch (e) {
@@ -6906,19 +6927,22 @@
           {#each rpVisibleTabs as t (t.key)}
             <div class="rp-pane" class:hidden={t.key !== rpTab}>
               {#if t.kind === 'artifacts'}
-                {#if rpStale}
-                  <!-- 基线过期（2026-10-31 用户实锤）：清单全是基线残留鬼影，隐藏 + 给重拍出口 -->
-                  <div class="rv-warn">{rpWarn}</div>
-                  <div class="rp-stale-note">基线已过期，已隐藏 {rpStaleCount} 个基线残留条目（都不是当前工作区里的改动）。</div>
-                  <div class="rp-stale-act"><button class="btn primary" on:click={rebaseline}>重新以当前状态为起点</button></div>
-                {:else if rpWarn}
+                {#if rpStale && !rpStaleClosed}
+                  <!-- 基线过期（2026-10-31 用户实锤）：一句话气泡，可关闭；失败就地可见 -->
+                  <div class="rp-stale-line" title={rpWarn}>
+                    <span class="rp-stale-t">基线已过期，已隐藏 {rpStaleCount} 个非当前工作区条目</span>
+                    <button class="rp-stale-go" on:click={rebaseline}>重新以当前状态为起点</button>
+                    {#if rpStaleErr}<span class="rp-stale-err">{rpStaleErr}</span>{/if}
+                    <button class="rp-stale-x" title="关闭提示" on:click={() => (rpStaleClosed = true)}>×</button>
+                  </div>
+                {:else if rpWarn && !rpStaleClosed}
                   <!-- 与 git 面板同源的基线陈旧警告：目录被挪走造成的幽灵删除 -->
                   <div class="rv-warn">{rpWarn}</div>
                 {/if}
                 {#if rpLoading}
                   <div class="trace-empty">加载中…</div>
-                {:else if rpStale}
-                  <!-- 清单已隐藏，只留上面的警告与重拍按钮 -->
+                {:else if rpStale && !rpStaleClosed}
+                  <!-- 气泡在上面，清单已隐藏 -->
                 {:else if !rpFiles.length}
                   <div class="rp-empty">{rpArtifactsNote || '本任务还没有产物。'}<br />agent 修改/创建文件后，这里会列出改动清单（相对本次任务起点）。</div>
                 {:else}
@@ -6980,11 +7004,13 @@
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12a7 7 0 1 1-2.05-4.95" /><path d="M19 3.5V7h-3.5" /></svg>
                     </button>
                   </div>
-                  {#if rvStale}
-                    <!-- 基线过期（2026-10-31 用户实锤）：任务档清单全是基线残留鬼影，隐藏 + 重拍出口 -->
-                    <div class="rv-warn">{rvWarn}</div>
-                    <div class="rp-stale-note">基线已过期，已隐藏 {rvStaleCount} 个基线残留条目（都不是当前工作区里的改动）。</div>
-                    <div class="rp-stale-act"><button class="btn primary" on:click={rebaseline}>重新以当前状态为起点</button></div>
+                  {#if rvStale && !rvStaleClosed}
+                    <div class="rp-stale-line" title={rvWarn}>
+                      <span class="rp-stale-t">基线已过期，已隐藏 {rvStaleCount} 个非当前工作区条目</span>
+                      <button class="rp-stale-go" on:click={rebaseline}>重新以当前状态为起点</button>
+                      {#if rvStaleErr}<span class="rp-stale-err">{rvStaleErr}</span>{/if}
+                      <button class="rp-stale-x" title="关闭提示" on:click={() => (rvStaleClosed = true)}>×</button>
+                    </div>
                   {:else if rvWarn}
                     <!-- 基线陈旧警告（后端 stale_subtree_warning）：基线里的顶层目录
                          已不在当前工作区，清单里它的「删除」很可能是目录被挪走造成的 -->
@@ -7013,8 +7039,8 @@
                     <div class="trace-empty">加载中…</div>
                   {:else if rvError && !rvFiles.length}
                     <div class="rp-empty">{rvError}</div>
-                  {:else if rvStale}
-                    <!-- 清单已隐藏，警告与重拍按钮在上面 -->
+                  {:else if rvStale && !rvStaleClosed}
+                    <!-- 气泡在上面，清单已隐藏 -->
                   {:else if !rvFiles.length}
                     <div class="rv-empty">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M8.5 12h7" /></svg>
@@ -10690,19 +10716,56 @@
     border: 1px solid color-mix(in srgb, var(--tint-orange-fg) 35%, transparent);
     border-radius: 6px;
   }
-  /* 基线过期态：说明行 + 重拍按钮（产物/git 两面板共用） */
-  .rp-stale-note {
-    margin: 8px 10px 0;
-    padding: 0 2px;
+  /* 基线过期：一句话可关闭气泡（产物/git 两面板共用），重拍按钮内联、失败就地可见 */
+  .rp-stale-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 10px;
+    padding: 6px 10px;
     font-size: 12px;
-    line-height: 1.6;
+    line-height: 1.5;
+    color: var(--tint-orange-fg);
+    background: color-mix(in srgb, var(--tint-orange-fg) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--tint-orange-fg) 30%, transparent);
+    border-radius: 8px;
+  }
+  .rp-stale-t {
+    flex: 1;
+    min-width: 0;
+  }
+  .rp-stale-go {
+    flex: none;
+    padding: 2px 8px;
+    font-size: 12px;
+    color: var(--g7);
+    background: var(--g3);
+    border: 1px solid var(--g4);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .rp-stale-go:hover {
+    background: var(--g4);
+  }
+  .rp-stale-err {
+    flex: none;
+    color: var(--tint-red-fg);
+    font-size: 11.5px;
+  }
+  .rp-stale-x {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    background: transparent;
     color: var(--g5);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
   }
-  .rp-stale-act {
-    margin: 10px;
-  }
-  .rp-stale-act .btn {
-    width: 100%;
+  .rp-stale-x:hover {
+    color: var(--g7);
   }
   .commit-msg {
     width: 100%;
@@ -11399,7 +11462,9 @@
     position: absolute;
     bottom: 0;
     left: 0;
-    right: 0;
+    /* 右侧给聊天区滚动条留 14px：输入框是悬浮层，聊天区滚动条从背后穿过——
+       右栏展开把列宽压窄后滑条与输入框相撞（2026-10-31 用户实锤） */
+    right: 14px;
     z-index: 5;
     padding: 12px 0 16px;
     background: transparent;
