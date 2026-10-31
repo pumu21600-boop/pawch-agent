@@ -262,3 +262,13 @@
 - **警告面**：编译一次通过零报错；126 条警告全不拦构建——Svelte 5 新增 a11y 规则 116 条、css_unused 9 条（check_md_css 兜底）、1 条既有 `<tr>` 直挂 `<table>`（浏览器自动补 tbody，仅渲染未改）。
 - **真机**（隔离实例+mock 渠道，Tabbit DOM 断言）：mount 挂载/流式/思考/工具卡（人话化工具行）/错误横幅/设置 8 分区/自研下拉交互/右面板产物+网页页签/主题切换/星云 WebGL/刷新恢复全过；坑：临时实例缺 providers.json 会启动即退（报错仅前台可见）。
 - **闸**：npm test 23 过 + check_fetch 93 调用点 + check_md_css 15 类 + build 零报错。Svelte 5 生态（Bits UI / TanStack Virtual / shadcn-svelte 等）自此解锁，待 UI 优化轮逐件引入。
+
+## 2026-10-31 UI 生态嫁接轮（施工单 035）
+
+- **件 1 代码高亮**：Shiki 4.5.0（`shiki/core` + JS 引擎无 WASM，12 语言 + github 深浅双主题，`defaultColor:false` CSS 变量模式随 `[data-theme]` 切换）；接入 afterUpdate 渲染后处理（data-hl 去重 + 150ms 防抖），md.js escape-first 管线零改动。坑：`shiki/langs` 是 346 语言整张表，会把 dist 膨到 12MB——必须用 `@shikijs/langs/*` 显式导入（模板串动态导入同样全量预编译），dist 回 33 文件 3.0MB。
+- **件 2 字体**：Inter Variable + JetBrains Mono Variable（fontsource woff2 子集本地打包），`--font-mono` 收敛全仓 26 处 Consolas。
+- **件 3 图标**：线宽 8 档归一到 1.8（CSS 覆盖，形状零改动，数据图形排除）；无首字图标实证；Lucide 记为字典。
+- **件 4 滚动条**：OverlayScrollbars 悬浮自动隐藏（leave），chat-body/side-scroll/rp-body 三容器 host 视口模式（DOM 不重构，scrollTop/scroll 原生语义保留，慢流自动跟随实测无损）；深浅主题 CSS 变量配色；Open Props 抄缓动/阴影令牌打底。
+- **件 5**：THIRD-PARTY_NOTICES.md（MIT/ISC/OFL 全家桶集中声明）。
+- **验证**：四闸全绿；真机（5274 隔离实例+代码块剧本）高亮着色/字体命中/OS host 模式/自动跟随全过；**坑：Tabbit 浏览器护眼模式改写页面颜色（内联 style 都动+注入 night-eye 变量），Tabbit 里断言颜色值不可信，验色走 node 复现+产物 CSS+DOM 变量三件套**。
+- **虚拟列表评估**：TanStack Virtual 可行但要动 mergeAssistantRun/多选/回滚的 DOM 假设与流式测高，留独立件；详见 docs/workorders/035。
