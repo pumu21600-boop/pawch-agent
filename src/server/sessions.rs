@@ -65,12 +65,10 @@ pub struct SessionMetaUpdate {
     /// Some=置顶/取消置顶
     #[serde(default)]
     pub pinned: Option<bool>,
-    /// Some=归档/取消归档
-    #[serde(default)]
-    pub archived: Option<bool>,
 }
 
-/// POST /api/sessions/meta —— DSH 式侧边栏：置顶/取消置顶、归档/取消归档、重命名。
+/// POST /api/sessions/meta —— 侧边栏：置顶/取消置顶、重命名。
+/// 归档已移除（2026-10-31）：会话只有删除，旧 archived 字段仅兼容旧文件读取。
 pub(super) async fn session_meta(
     State(state): State<AppState>,
     Json(req): Json<SessionMetaUpdate>,
@@ -80,8 +78,8 @@ pub(super) async fn session_meta(
         if let Some(t) = &req.title {
             sess.rename(&req.id, t.trim())?;
         }
-        if req.pinned.is_some() || req.archived.is_some() {
-            sess.set_flags(&req.id, req.pinned, req.archived)?;
+        if req.pinned.is_some() {
+            sess.set_flags(&req.id, req.pinned)?;
         }
         Ok(())
     })
@@ -107,42 +105,6 @@ pub(super) async fn fork_session(
     let id = req.id.clone();
     match tokio::task::spawn_blocking(move || sess.fork(&id)).await {
         Ok(Ok(new_id)) => (StatusCode::OK, Json(json!({ "ok": true, "id": new_id }))),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SessionBatchRequest {
-    pub ids: Vec<String>,
-    /// Some=批量置顶/取消置顶
-    #[serde(default)]
-    pub pinned: Option<bool>,
-    /// Some=批量归档/取消归档（管理模式主用）
-    #[serde(default)]
-    pub archived: Option<bool>,
-}
-
-/// POST /api/sessions/batch —— 管理模式批量操作（归档/取消归档/置顶）。
-pub(super) async fn batch_sessions(
-    State(state): State<AppState>,
-    Json(req): Json<SessionBatchRequest>,
-) -> (StatusCode, Json<Value>) {
-    let sess = state.session.clone();
-    let ids = req.ids.clone();
-    let (pinned, archived) = (req.pinned, req.archived);
-    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-        let mut n = 0;
-        for id in &ids {
-            if sess.set_flags(id, pinned, archived).is_ok() {
-                n += 1;
-            }
-        }
-        Ok(n)
-    })
-    .await;
-    match res {
-        Ok(Ok(n)) => (StatusCode::OK, Json(json!({ "ok": true, "updated": n }))),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
     }

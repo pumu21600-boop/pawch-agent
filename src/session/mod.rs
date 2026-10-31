@@ -108,7 +108,7 @@ pub struct SessionFile {
     /// DSH 式侧边栏：置顶（列表内沉底排序的最前）
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
-    /// DSH 式侧边栏：归档（默认列表隐藏，管理模式可见/可取消）
+    /// 【已废弃】旧归档标记（2026-10-31 机制移除，只保留删除）；字段仅兼容旧文件读取，新代码不得读写
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
     /// 用量快照（重启后恢复圆环/缓存行；旧文件缺省 None）
@@ -126,7 +126,6 @@ pub struct SessionMeta {
     pub count: usize,
     pub workspace: String,
     pub pinned: bool,
-    pub archived: bool,
 }
 
 pub struct SessionManager {
@@ -271,7 +270,7 @@ impl SessionManager {
         if let Some(m) = self
             .list()
             .into_iter()
-            .find(|m| m.count == 0 && !m.archived && m.workspace == workspace)
+            .find(|m| m.count == 0 && m.workspace == workspace)
             && let Some(f) = self.get(&m.id) {
                 return Ok(f);
             }
@@ -317,14 +316,13 @@ impl SessionManager {
         let path = self.path(id);
         let existed = path.exists();
         // 用量快照随文件保留：save 由消息侧高频调用，不能把 update_usage 写的快照抹掉
-        let (title, created_at, old_summary, workspace, pinned, archived, old_usage) = match self.get(id) {
+        let (title, created_at, old_summary, workspace, pinned, old_usage) = match self.get(id) {
             Some(old) => (
                 old.title,
                 old.created_at,
                 old.summary,
                 old.workspace,
                 old.pinned,
-                old.archived,
                 old.usage,
             ),
             None if !existed => (
@@ -332,7 +330,6 @@ impl SessionManager {
                 now.clone(),
                 None,
                 crate::tools::workspace_root().display().to_string(),
-                false,
                 false,
                 None,
             ),
@@ -352,7 +349,7 @@ impl SessionManager {
             summary: summary.map(|s| s.to_string()).or(old_summary),
             workspace,
             pinned,
-            archived,
+            archived: false,
             usage: old_usage,
         };
         self.write(&file)
@@ -424,7 +421,6 @@ impl SessionManager {
                 count: f.messages.len(),
                 workspace: f.workspace,
                 pinned: f.pinned,
-                archived: f.archived,
             });
         }
         metas.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated_at.cmp(&a.updated_at)));
@@ -460,8 +456,9 @@ impl SessionManager {
         self.write(&f)
     }
 
-    /// DSH 式侧边栏：置顶 / 归档标记（其余字段原样保留；不动 updated_at）。
-    pub fn set_flags(&self, id: &str, pinned: Option<bool>, archived: Option<bool>) -> anyhow::Result<()> {
+    /// DSH 式侧边栏：置顶标记（其余字段原样保留；不动 updated_at）。
+    /// 归档已移除（2026-10-31）：只留删除，字段仅旧文件兼容。
+    pub fn set_flags(&self, id: &str, pinned: Option<bool>) -> anyhow::Result<()> {
         let lock = self.session_lock(id);
         let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
         let Some(mut f) = self.get(id) else {
@@ -469,9 +466,6 @@ impl SessionManager {
         };
         if let Some(p) = pinned {
             f.pinned = p;
-        }
-        if let Some(a) = archived {
-            f.archived = a;
         }
         self.write(&f)
     }
@@ -950,34 +944,28 @@ mod tests {
         assert!(!m.get(&a).unwrap().workspace.is_empty(), "新会话应记录创建时的工作区");
 
         // 置顶 → 列表置前；save 续写后置顶保留
-        m.set_flags(&a, Some(true), None).unwrap();
+        m.set_flags(&a, Some(true)).unwrap();
         assert!(m.list()[0].pinned);
         m.save(&a, &[json!({"role":"user","content":"原始会话"}), json!({"role":"assistant","content":"好"})], None).unwrap();
         assert!(m.get(&a).unwrap().pinned, "save 不得丢置顶标记");
 
-        // 归档 → 标记可见（前端负责过滤）
-        m.set_flags(&a, None, Some(true)).unwrap();
-        assert!(m.get(&a).unwrap().archived);
-        assert!(m.list()[0].archived);
+        // 取消置顶
+        m.set_flags(&a, Some(false)).unwrap();
+        assert!(!m.get(&a).unwrap().pinned);
 
-        // 取消置顶+取消归档
-        m.set_flags(&a, Some(false), Some(false)).unwrap();
-        let fa = m.get(&a).unwrap();
-        assert!(!fa.pinned && !fa.archived);
-
-        // 分叉：消息/摘要/工作区复制，标题加（分叉），新 id，无置顶归档
-        m.set_flags(&a, Some(true), None).unwrap();
+        // 分叉：消息/摘要/工作区复制，标题加（分叉），新 id，无置顶
+        m.set_flags(&a, Some(true)).unwrap();
         m.rename(&a, "原始标题").unwrap();
         let forked = m.fork(&a).unwrap();
         let ff = m.get(&forked).unwrap();
         assert_eq!(ff.title, "原始标题（分叉）");
         assert_eq!(ff.messages.len(), m.get(&a).unwrap().messages.len());
         assert_eq!(ff.workspace, m.get(&a).unwrap().workspace);
-        assert!(!ff.pinned && !ff.archived, "分叉不带走置顶/归档");
+        assert!(!ff.pinned && !ff.archived, "分叉不带走置顶；archived 恒为 false");
         assert_ne!(forked, a);
 
         // 不存在的会话
-        assert!(m.set_flags("ghost", Some(true), None).is_err());
+        assert!(m.set_flags("ghost", Some(true)).is_err());
         assert!(m.fork("ghost").is_err());
     }
 
@@ -993,7 +981,7 @@ mod tests {
         let (_d, m) = mgr("clobber");
         let a = m.new_id();
         m.save(&a, &[json!({"role":"user","content":"原始会话"})], None).unwrap();
-        m.set_flags(&a, Some(true), Some(true)).unwrap();
+        m.set_flags(&a, Some(true)).unwrap();
         m.rename(&a, "重要标题").unwrap();
 
         // 损坏盘上文件（合法 id、合法路径，内容不是 JSON）
@@ -1022,7 +1010,8 @@ mod tests {
         .unwrap();
         m.save(&a, &[json!({"role":"user","content":"原始会话"})], None).unwrap();
         let f = m.get(&a).unwrap();
-        assert!(f.pinned && f.archived, "元数据必须还在");
+        assert!(f.pinned, "置顶必须还在");
+        assert!(!f.archived, "废弃的归档标记随写入归零（机制已移除，字段仅兼容旧文件）");
         assert_eq!(f.title, "重要标题");
     }
 
@@ -1153,7 +1142,7 @@ mod concurrency_tests {
             let i2 = id.clone();
             s.spawn(move || {
                 for n in 0..80 {
-                    mm2.set_flags(&i2, Some(n % 2 == 0), None).unwrap();
+                    mm2.set_flags(&i2, Some(n % 2 == 0)).unwrap();
                 }
             });
         });

@@ -585,7 +585,8 @@ fn build_entry(m: &crate::session::SessionMeta, f: Option<&SessionFile>, prev: O
         count: m.count,
         chars,
         pinned: m.pinned,
-        archived: m.archived,
+        // 会话归档已移除（2026-10-31）：来自会话的条目恒为未归档，archived 只属于记忆条目自身
+        archived: false,
         digest,
         snippet,
         fp,

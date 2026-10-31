@@ -136,7 +136,6 @@ pub(crate) async fn build_library(state: &AppState, force: bool) -> Value {
                 "count": e.count,
                 "chars": e.chars,
                 "pinned": e.pinned,
-                "archived": e.archived,
                 "snippet": e.snippet,
                 "indexed": !e.vec.is_empty(),
             })

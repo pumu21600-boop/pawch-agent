@@ -447,7 +447,7 @@
     modelMenuOpen = false;
     thinkMenuOpen = false;
     approvalMenuOpen = false;
-    viewMenuOpen = false;
+    sideMenuOpen = false;
     sessMenuId = null;
     projMenuPath = null;
   }
@@ -3597,7 +3597,7 @@
       // （2026-09-29 用户实锤「只回复两个字：收到」轮）；侧栏「未分组」里仍可手动打开。
       if (autoPick && currentSessionId === null) {
         const mine = sessions.filter(
-          (s) => !s.archived && s.workspace && normPath(s.workspace).toLowerCase() === normPath(workspace).toLowerCase(),
+          (s) => s.workspace && normPath(s.workspace).toLowerCase() === normPath(workspace).toLowerCase(),
         );
         // 重启后默认打开最近一条**有内容**的会话：侧栏最上面可能是一条空的新对话
         // （用户刚点过「新对话」），直接打开它看起来就像「历史/思考/工具调用被清掉了」。
@@ -3843,7 +3843,7 @@
   }
   let sessMenuId = null; // 打开了操作菜单的会话 id
   let projMenuPath = null; // 打开了操作菜单的项目 path
-  let viewMenuOpen = false;
+  let sideMenuOpen = false; // 工具条合并菜单（两个视图 + 会话管理）
   let renameModal = null; // { kind: 'session'|'project', target, value }
   // 通用确认弹窗：桌面壳（Tauri WebView2）不实现 window.confirm/alert（静默无操作），
   // 全部确认/提示走应用内弹窗。{ text, okOnly, resolve }。
@@ -3887,7 +3887,7 @@
   })();
 
   $: searchQ = searchQuery.trim().toLowerCase();
-  $: visibleSessions = manageMode ? sessions : sessions.filter((s) => !s.archived);
+  $: visibleSessions = sessions;
 
   // 分组：会话按创建时工作区归项目；无工作区记录的旧会话进「未分组」
   $: sessionsByProject = (() => {
@@ -3968,8 +3968,13 @@
     if (!searchOpen) searchQuery = '';
   }
 
-  function toggleManage() {
-    manageMode = !manageMode;
+  function enterManage() {
+    sideMenuOpen = false;
+    manageMode = true;
+    checkedIds = [];
+  }
+  function exitManage() {
+    manageMode = false;
     checkedIds = [];
   }
 
@@ -3986,31 +3991,20 @@
   $: manageTotal =
     sidebarView === 'list' ? flatSessions.length : displayRows.filter((r) => r.type === 'conv').length;
 
-  async function batchSet(archived) {
-    if (!checkedIds.length) return;
-    await fetch('/api/sessions/batch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: checkedIds, archived }),
-    });
-    checkedIds = [];
-    await loadSessions();
-    await settleCurrentSessionAfterListChange();
-  }
-
   async function batchDelete() {
     if (!checkedIds.length || !(await confirmAsk(`删除选中的 ${checkedIds.length} 条会话？不可恢复`))) return;
     for (const id of checkedIds) {
       await fetch(`/api/session?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
     }
-    if (checkedIds.includes(currentSessionId)) await startNewSession();
+    const hadCurrent = checkedIds.includes(currentSessionId);
     checkedIds = [];
     await loadSessions();
+    if (hadCurrent) await settleCurrentSessionAfterListChange();
   }
 
   function pickView(v) {
     sidebarView = v;
-    viewMenuOpen = false;
+    sideMenuOpen = false;
     localStorage.setItem('sidebarView', v);
   }
 
@@ -4060,37 +4054,31 @@
   // sessions.find，切到了另一个（刚被移除的）工作区的会话——loadSession 会经
   // /api/sessions/open 把工作区切回去，看起来像已删工作区被复原。绝不跨工作区。
   async function settleCurrentSessionAfterListChange() {
+    // 当前会话还在列表里就不动；没了才切到同工作区最近一条，没有再开新会话。
+    // 2026-10-27 实锤过跨工作区乱切：绝不拿全局列表找「下一条」。
     if (!currentSessionId) return;
     const cur = sessions.find((x) => x.id === currentSessionId);
-    if (cur && !cur.archived) return;
+    if (cur) return;
     if (!workspace) {
       await startNewSession();
       return;
     }
     const ws = normPath(workspace).toLowerCase();
     const next = sessions.find(
-      (x) =>
-        x.id !== currentSessionId &&
-        !x.archived &&
-        x.workspace &&
-        normPath(x.workspace).toLowerCase() === ws,
+      (x) => x.id !== currentSessionId && x.workspace && normPath(x.workspace).toLowerCase() === ws,
     );
     if (next) await loadSession(next.id);
     else await startNewSession();
   }
 
-  async function toggleArchive(s) {
+  async function deleteSessionRow(s) {
     sessMenuId = null;
-    await fetch('/api/sessions/meta', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: s.id, archived: !s.archived }),
-    });
+    if (!(await confirmAsk('删除会话「' + (s.title || '无标题') + '」？不可恢复'))) return;
+    await fetch('/api/session?id=' + encodeURIComponent(s.id), { method: 'DELETE' });
     await loadSessions();
-    // 归档的正是当前会话：切到同项目最近一条未归档会话，没有则回新会话空态。
-    // 不切的话服务端 current 仍指向归档会话——侧栏看不见它，输入却还在往里写
-    // （2026-10-24 E2E D2 实锤：归档当前会话后发消息，消息进了归档会话）。
-    if (s.id === currentSessionId && !s.archived) await settleCurrentSessionAfterListChange();
+    // 删的正是当前会话：切到同项目最近一条，没有则回新会话空态。
+    // 不切的话服务端 current 仍指向已删会话——输入还在往里写。
+    if (s.id === currentSessionId) await settleCurrentSessionAfterListChange();
   }
 
   async function forkSession(id) {
@@ -4711,19 +4699,6 @@
           body: JSON.stringify({ id: m.id, pinned: m.on !== false }),
         });
         loadSessions();
-      },
-    },
-    archive_session: {
-      kind: 'archive_session', title: '归档/取消归档会话', risk: 'normal', internal: false,
-      args: 'id: 会话 id；on: true=执行 false=取消（默认 true）',
-      async run(m) {
-        await fetch('/api/sessions/meta', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: m.id, archived: m.on !== false }),
-        });
-        await loadSessions();
-        await settleCurrentSessionAfterListChange();
       },
     },
     delete_session: {
@@ -5780,25 +5755,29 @@
           <button class="icon-btn" class:on={searchOpen} title="搜索会话" on:click={toggleSearch}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.3" y2="16.3"/></svg>
           </button>
-          <button class="icon-btn" class:on={manageMode} title="管理会话（批量归档）" on:click={toggleManage}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="6.5" cy="7" r="2.2"/><line x1="11" y1="7" x2="19.5" y2="7"/><circle cx="6.5" cy="17" r="2.2"/><line x1="11" y1="17" x2="19.5" y2="17"/></svg>
-          </button>
-          <button class="icon-btn" class:on={viewMenuOpen} title="切换视图" on:click={() => (viewMenuOpen = !viewMenuOpen)}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="3.5" y1="6" x2="9.5" y2="6"/><line x1="14.5" y1="6" x2="20.5" y2="6"/><circle cx="12" cy="6" r="2"/><line x1="3.5" y1="12" x2="4" y2="12"/><line x1="8" y1="12" x2="20.5" y2="12"/><circle cx="6" cy="12" r="2"/><line x1="3.5" y1="18" x2="11.5" y2="18"/><line x1="16.5" y1="18" x2="20.5" y2="18"/><circle cx="14" cy="18" r="2"/></svg>
+          <button class="icon-btn" class:on={sideMenuOpen || manageMode} title="视图与会话管理" on:click={() => (sideMenuOpen = !sideMenuOpen)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="4" y1="7.5" x2="20" y2="7.5"/><circle cx="9.5" cy="7.5" r="2.2"/><line x1="4" y1="16.5" x2="20" y2="16.5"/><circle cx="14.5" cy="16.5" r="2.2"/></svg>
           </button>
           <button class="icon-btn" title="添加项目" on:click={addProject}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.2v5.8a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h3.2l1.8 2H18a2 2 0 0 1 2 2v.2"/><line x1="17" y1="2.5" x2="17" y2="8"/><line x1="14.2" y1="5.2" x2="19.8" y2="5.2"/></svg>
           </button>
         </span>
-        {#if viewMenuOpen}
+        {#if sideMenuOpen}
           <div class="side-menu view-menu">
             <button on:click={() => pickView('workspace')}>
-              <span>按工作区</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M20 19.5a1.8 1.8 0 0 0 1.8-1.8V8.3a1.8 1.8 0 0 0-1.8-1.8h-7.4a1.8 1.8 0 0 1-1.5-.8l-.8-1.2a1.8 1.8 0 0 0-1.5-.8H4a1.8 1.8 0 0 0-1.8 1.8v12.2A1.8 1.8 0 0 0 4 19.5Z"/></svg>
+              <span>按工作区分组</span>
               {#if sidebarView === 'workspace'}<svg class="sel-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>{/if}
             </button>
             <button on:click={() => pickView('list')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="4" y1="6.5" x2="20" y2="6.5"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17.5" x2="20" y2="17.5"/></svg>
               <span>单列表</span>
               {#if sidebarView === 'list'}<svg class="sel-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>{/if}
+            </button>
+            <div class="menu-sep"></div>
+            <button on:click={enterManage}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="7" height="7" rx="1.5"/><path d="m5.2 7.6 1.4 1.4 2.4-2.6"/><rect x="13.5" y="4" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>
+              <span>会话管理</span>
             </button>
           </div>
         {/if}
@@ -5812,10 +5791,8 @@
         <div class="manage-bar">
           <span class="m-count">已选 {checkedIds.length} / {manageTotal}</span>
           <button class="m-btn" on:click={() => (checkedIds = manageVisibleIds())}>全选</button>
-          <button class="m-btn" disabled={!checkedIds.length} on:click={() => batchSet(true)}>归档</button>
-          <button class="m-btn" disabled={!checkedIds.length} on:click={() => batchSet(false)}>取消归档</button>
-          <button class="m-btn" disabled={!checkedIds.length} on:click={batchDelete}>删除</button>
-          <button class="m-btn primary" on:click={toggleManage}>完成</button>
+          <button class="m-btn danger" disabled={!checkedIds.length} on:click={batchDelete}>删除所选</button>
+          <button class="m-btn primary" on:click={exitManage}>完成</button>
         </div>
       {/if}
     </div>
@@ -5885,8 +5862,7 @@
             {:else if s.pinned}
               <svg class="conv-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" transform="rotate(38 12 12)"><path d="M14.5 4.2 19.8 9.5a1 1 0 0 1-.94 1.68l-2.6-.52-3.62 3.62.55 2.87a1 1 0 0 1-1.7.89L9.9 16.4l-4.6 4.6-1.3-1.3 4.6-4.6-1.64-1.64a1 1 0 0 1 .89-1.7l2.87.55 3.62-3.62-.52-2.6a1 1 0 0 1 1.68-.94Z"/></svg>
             {/if}
-            <span class="conv-title" class:archived={s.archived} title={s.title}>{s.title}</span>
-            {#if manageMode && s.archived}<span class="arch-tag">已归档</span>{/if}
+            <span class="conv-title" title={s.title}>{s.title}</span>
             {#if !manageMode}
               <button class="conv-more" title="会话操作" on:click|stopPropagation={() => (sessMenuId = sessMenuId === s.id ? null : s.id)}>
                 <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5.5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18.5" cy="12" r="1.6"/></svg>
@@ -5907,9 +5883,9 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 6.5h11"/><circle cx="18.3" cy="6.5" r="1.7"/><path d="M5 6.5c5.5 0 3.5 11 9.5 11"/><circle cx="18.3" cy="17.5" r="1.7"/></svg>
                   分叉会话
                 </button>
-                <button on:click|stopPropagation={() => toggleArchive(s)}>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3.5" width="18" height="5" rx="1.2"/><path d="M4.8 8.5V19a1.8 1.8 0 0 0 1.8 1.8h10.8a1.8 1.8 0 0 0 1.8-1.8V8.5"/><path d="M9.8 12.2h4.4"/></svg>
-                  {s.archived ? '取消归档' : '归档会话'}
+                <button on:click|stopPropagation={() => deleteSessionRow(s)}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                  删除会话
                 </button>
               </div>
             {/if}
@@ -7903,11 +7879,21 @@
   }
   .section-tools {
     display: flex;
-    gap: 2px;
+    gap: 3px;
   }
   .section-tools .icon-btn {
-    width: 32px;
-    height: 32px;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    color: var(--g5);
+  }
+  .section-tools .icon-btn:hover,
+  .section-tools .icon-btn.on {
+    color: var(--g7);
+  }
+  .section-tools .icon-btn svg {
+    width: 18px;
+    height: 18px;
   }
   .side-search {
     margin: 2px 2px 8px;
@@ -7952,6 +7938,13 @@
   .m-btn:disabled {
     opacity: 0.45;
     cursor: default;
+  }
+  .m-btn.danger {
+    color: var(--err, #e5697a);
+    border-color: color-mix(in srgb, var(--err, #e5697a) 38%, transparent);
+  }
+  .m-btn.danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--err, #e5697a) 12%, transparent);
   }
   .m-btn.primary {
     background: var(--g3);
@@ -8119,17 +8112,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .conv-title.archived {
-    opacity: 0.55;
-  }
-  .arch-tag {
-    font-size: 11px;
-    color: var(--g5);
-    border: 1px solid var(--g2);
-    border-radius: 6px;
-    padding: 1px 6px;
-    flex: none;
-  }
   .conv-more {
     display: none;
     width: 26px;
@@ -8201,6 +8183,11 @@
   .view-menu {
     top: calc(100% + 2px);
     right: 0;
+  }
+  .menu-sep {
+    height: 1px;
+    margin: 5px 8px;
+    background: var(--g2);
   }
   .side-menu button {
     display: flex;
