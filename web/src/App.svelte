@@ -9,6 +9,10 @@
   import ImagePreview from './lib/ImagePreview.svelte';
   // 助手消息 markdown 渲染（2026-10-04 用户拍板「星号太多」：escape-first 安全渲染）
   import { md } from './lib/md.js';
+  // 代码高亮（035 件 1）：懒加载 Shiki，渲染后处理里喂 .md-codeblock，md 管线不动
+  import { enhanceCodeBlocks } from './lib/highlight.js';
+  // 悬浮滚动条（035 件 4）：只接管主滚动容器的「皮」，原生滚动语义不变
+  import { OverlayScrollbars } from 'overlayscrollbars';
   // 聊天展示层纯逻辑（2026-10-30 UI 轮）：分段/合并/工具人话化。
   // 不碰 DOM，Node 单测见 web/test/chat.test.mjs（npm test / CI 门禁）。
   import {
@@ -516,7 +520,26 @@
     if (!dragging && chatPinned && chatBody) chatBody.scrollTop = chatBody.scrollHeight;
     // 单元素微调标记：Svelte 重渲染会重建节点，这里按存下的路径补盖 data-mt
     if (!dragging) stampMicroUids();
+    // 代码高亮（035 件 1）：内部自带去重与 150ms 防抖，空转成本是一次 querySelector
+    if (!dragging) enhanceCodeBlocks(chatBody);
+    // 悬浮滚动条（035 件 4）：幂等初始化（已接管=无操作），右面板后开也能被下一轮补上
+    if (!dragging) ensureScrollbars();
   });
+
+  // 035 件 4：主滚动容器接管。chat-body/side-scroll 带 data-overlayscrollbars-initialize
+  // （元素自身当视口，DOM 结构不动——scrollTop 赋值与 scroll 事件语义保持原生），
+  // rp-body 逐开逐接管。autoHide=leave：停手即隐；深浅主题配色在 ui.css 按 data-theme 配。
+  function ensureScrollbars() {
+    for (const sel of ['.chat-body', '.side-scroll', '.rp-body']) {
+      const el = document.querySelector(sel);
+      if (!el) continue;
+      try {
+        OverlayScrollbars(el, { scrollbars: { autoHide: 'leave', autoHideDelay: 500, theme: 'os-theme-dark' } });
+      } catch {
+        // 个别容器接管失败不拖垮渲染后处理，该容器回落原生滚动条
+      }
+    }
+  }
 
   function onChatScroll() {
     if (!chatBody) return;
@@ -5797,7 +5820,7 @@
       {/if}
     </div>
 
-    <div class="side-scroll">
+    <div class="side-scroll" data-overlayscrollbars-initialize>
       {#each displayRows as row}
         {#if row.type === 'proj'}
           <div
@@ -5992,7 +6015,7 @@
     {/if}
 
     <div class="chat-main">
-      <div class="chat-body" bind:this={chatBody} on:scroll={onChatScroll}>
+      <div class="chat-body" data-overlayscrollbars-initialize bind:this={chatBody} on:scroll={onChatScroll}>
       {#if startupError}
         <!-- 启动失败必须可见：服务未就绪时不许只留一个空对话（2026-10-27 实锤） -->
         <div class="msg error-row startup-error">
@@ -6825,7 +6848,7 @@
           </div>
         {/if}
       </div>
-      <div class="rp-body">
+      <div class="rp-body" data-overlayscrollbars-initialize>
         {#if !rpVisibleTabs.length}
           <!-- 标签全关掉后的选择页：点卡片即开该面板 -->
           <div class="rp-open">
@@ -8518,7 +8541,7 @@
     background: #101216;
     color: #d4d4d4;
     border-top: 1px solid var(--g3);
-    font-family: Consolas, 'Cascadia Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 12.5px;
   }
   .term-resize {
@@ -9267,7 +9290,7 @@
     border-radius: 8px;
     background: var(--g1);
     color: var(--g6);
-    font: 12.5px/1.55 Consolas, "Cascadia Code", monospace;
+    font: 12.5px/1.55 var(--font-mono);
     resize: none;
     outline: none;
   }
@@ -9310,7 +9333,7 @@
     border-radius: 6px;
     background: transparent;
     color: var(--g6);
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 12.5px;
     cursor: pointer;
     overflow: hidden;
@@ -9336,7 +9359,7 @@
     background: var(--g1);
     border-bottom: 1px solid var(--g2);
     color: var(--g5);
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 11.5px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -9349,7 +9372,7 @@
     border: 1px solid var(--g3);
     border-radius: 8px;
     color: var(--g6);
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
     /* 代码按词换行，不从单词中间劈开（原来 break-all 会把 SECURITY 拆成两行） */
     white-space: pre-wrap;
@@ -9406,7 +9429,7 @@
     margin-bottom: 4px;
   }
   .micro-sel {
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 10.5px;
     color: var(--g5);
     margin-bottom: 8px;
@@ -9448,7 +9471,7 @@
   }
   .micro-val {
     color: var(--g6);
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 11px;
     min-width: 52px;
   }
@@ -9806,7 +9829,7 @@
     border: 1px solid color-mix(in srgb, var(--g3) 70%, transparent);
     border-radius: 5px;
     padding: 1px 5px;
-    font: 12.5px/1.5 Consolas, 'Cascadia Code', monospace;
+    font: 12.5px/1.5 var(--font-mono);
     color: var(--g7);
   }
   /* 代码块：独立卡片 + 语言标签 + 复制按钮（md.js 生成结构，点击委托在 onContentClick） */
@@ -9874,7 +9897,7 @@
     font-weight: 600;
   }
   .content :global(.md-pre code) {
-    font: 12.5px/1.7 Consolas, 'Cascadia Code', monospace;
+    font: 12.5px/1.7 var(--font-mono);
     white-space: pre;
   }
   /* 模型把 <tool_call> 协议当正文吐出来的历史消息：折叠成可展开块，不铺满屏幕 */
@@ -9903,7 +9926,7 @@
     border-top: 1px solid var(--g2);
     background: var(--g0);
     color: var(--g5);
-    font: 12px/1.6 Consolas, 'Cascadia Code', monospace;
+    font: 12px/1.6 var(--font-mono);
     white-space: pre-wrap;
     word-break: break-all;
   }
@@ -10371,7 +10394,7 @@
     white-space: nowrap;
     font-size: 12px;
     color: var(--g5);
-    font-family: Consolas, 'Cascadia Code', monospace;
+    font-family: var(--font-mono);
   }
   .tool-status {
     display: grid;
@@ -10439,7 +10462,7 @@
     border-radius: 6px;
     background: var(--g0);
     color: var(--g6);
-    font: 12px/1.6 Consolas, 'Cascadia Code', monospace;
+    font: 12px/1.6 var(--font-mono);
     white-space: pre-wrap;
     word-break: break-all;
     max-height: 200px;
@@ -10939,7 +10962,7 @@
   .rv-diff {
     margin: 0;
     padding: 8px 0;
-    font-family: Consolas, 'Courier New', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.6;
     min-width: max-content;
@@ -11177,7 +11200,7 @@
     margin-left: auto;
     font-size: 11px;
     color: var(--g5);
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     max-width: 180px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -11191,7 +11214,7 @@
     color: var(--g5);
   }
   .subagent-meta.dim {
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     opacity: 0.7;
   }
   .subagent-item-cancel,
@@ -11303,7 +11326,7 @@
   .computer-log-row {
     font-size: 11px;
     color: var(--g6);
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     padding: 4px 6px;
     background: var(--g2);
     border-radius: 5px;
@@ -11429,7 +11452,7 @@
     color: var(--tint-red-fg);
   }
   .model-pill {
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
   }
   .bar-dropdown {
     position: absolute;
@@ -11652,7 +11675,7 @@
     border-radius: 6px;
     background: transparent;
     color: var(--g6);
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 12.5px;
     line-height: 1.5;
     cursor: pointer;
@@ -11796,7 +11819,7 @@
   .agents-editor {
     width: 100%;
     box-sizing: border-box;
-    font-family: Consolas, 'Courier New', monospace;
+    font-family: var(--font-mono);
     font-size: 12.5px;
     line-height: 1.7;
     background: var(--g1);

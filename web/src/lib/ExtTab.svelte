@@ -167,7 +167,7 @@
 
 <style>
   .mcp-cmd {
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 11px;
     color: var(--g5);
     margin: 6px 0;

@@ -50,7 +50,7 @@
     gap: 8px;
     align-items: center;
     padding: 4px 6px;
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 13px;
     cursor: pointer;
   }

@@ -58,7 +58,7 @@
 
 <style>
   .ws-current {
-    font-family: Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
     color: var(--g6);
     background: var(--g1);
