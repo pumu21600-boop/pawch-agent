@@ -11,8 +11,9 @@
   import { md } from './lib/md.js';
   // 代码高亮（035 件 1）：懒加载 Shiki，渲染后处理里喂 .md-codeblock，md 管线不动
   import { enhanceCodeBlocks } from './lib/highlight.js';
-  // 悬浮滚动条（035 件 4）：只接管主滚动容器的「皮」，原生滚动语义不变
-  import { OverlayScrollbars } from 'overlayscrollbars';
+  // OverlayScrollbars 已回滚（035 补丁）：它会重构滚动容器 DOM（宿主 overflow:hidden +
+  // 自建视口），与全仓写死在宿主 scrollTop 上的自动跟随/钉底判定根本冲突，真人滚轮
+  // 实测划不动。滚动条美化回归纯 CSS（ui.css ::-webkit-scrollbar）。
   // 聊天展示层纯逻辑（2026-10-30 UI 轮）：分段/合并/工具人话化。
   // 不碰 DOM，Node 单测见 web/test/chat.test.mjs（npm test / CI 门禁）。
   import {
@@ -522,24 +523,7 @@
     if (!dragging) stampMicroUids();
     // 代码高亮（035 件 1）：内部自带去重与 150ms 防抖，空转成本是一次 querySelector
     if (!dragging) enhanceCodeBlocks(chatBody);
-    // 悬浮滚动条（035 件 4）：幂等初始化（已接管=无操作），右面板后开也能被下一轮补上
-    if (!dragging) ensureScrollbars();
   });
-
-  // 035 件 4：主滚动容器接管。chat-body/side-scroll 带 data-overlayscrollbars-initialize
-  // （元素自身当视口，DOM 结构不动——scrollTop 赋值与 scroll 事件语义保持原生），
-  // rp-body 逐开逐接管。autoHide=leave：停手即隐；深浅主题配色在 ui.css 按 data-theme 配。
-  function ensureScrollbars() {
-    for (const sel of ['.chat-body', '.side-scroll', '.rp-body']) {
-      const el = document.querySelector(sel);
-      if (!el) continue;
-      try {
-        OverlayScrollbars(el, { scrollbars: { autoHide: 'leave', autoHideDelay: 500, theme: 'os-theme-dark' } });
-      } catch {
-        // 个别容器接管失败不拖垮渲染后处理，该容器回落原生滚动条
-      }
-    }
-  }
 
   function onChatScroll() {
     if (!chatBody) return;
@@ -5820,7 +5804,7 @@
       {/if}
     </div>
 
-    <div class="side-scroll" data-overlayscrollbars-initialize>
+    <div class="side-scroll">
       {#each displayRows as row}
         {#if row.type === 'proj'}
           <div
@@ -6015,7 +5999,7 @@
     {/if}
 
     <div class="chat-main">
-      <div class="chat-body" data-overlayscrollbars-initialize bind:this={chatBody} on:scroll={onChatScroll}>
+      <div class="chat-body" bind:this={chatBody} on:scroll={onChatScroll}>
       {#if startupError}
         <!-- 启动失败必须可见：服务未就绪时不许只留一个空对话（2026-10-27 实锤） -->
         <div class="msg error-row startup-error">
@@ -6848,7 +6832,7 @@
           </div>
         {/if}
       </div>
-      <div class="rp-body" data-overlayscrollbars-initialize>
+      <div class="rp-body">
         {#if !rpVisibleTabs.length}
           <!-- 标签全关掉后的选择页：点卡片即开该面板 -->
           <div class="rp-open">

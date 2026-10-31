@@ -272,3 +272,9 @@
 - **件 5**：THIRD-PARTY_NOTICES.md（MIT/ISC/OFL 全家桶集中声明）。
 - **验证**：四闸全绿；真机（5274 隔离实例+代码块剧本）高亮着色/字体命中/OS host 模式/自动跟随全过；**坑：Tabbit 浏览器护眼模式改写页面颜色（内联 style 都动+注入 night-eye 变量），Tabbit 里断言颜色值不可信，验色走 node 复现+产物 CSS+DOM 变量三件套**。
 - **虚拟列表评估**：TanStack Virtual 可行但要动 mergeAssistantRun/多选/回滚的 DOM 假设与流式测高，留独立件；详见 docs/workorders/035。
+
+## 2026-10-31 滚动条回滚补丁（用户实锤，v0.32.40）
+
+- OverlayScrollbars 致聊天区滚轮失灵（用户「划不动对话界面」）：OS v2 必然重构滚动容器 DOM（宿主 overflow:hidden+自建视口），与本应用写死在宿主 scrollTop 上的自动跟随/钉底管线冲突；035b 隔离实例真人滚轮复现（位移 0）。
+- 整体回滚 OS（卸依赖+移除接管），滚动条改纯 CSS（::-webkit-scrollbar 细圆角，零 JS）；高亮/字体/图标保留。修复版重验：滚轮位移恢复、回到底部/钉底正常、高亮与字体无回归。
+- **教训入档**：①「initial DOM 不动」类假设必须看 OS 实际 CSS（`[data-overlayscrollbars~=host]{overflow:hidden!important}`）而不是想当然；②滚动断言必须真人滚轮看位移，atBottom 类判定在不可滚容器上恒真；③上轮「跟随无损」结论作废重验。
