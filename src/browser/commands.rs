@@ -67,6 +67,7 @@ impl From<BrowserError> for String {
 /// 统一命令方法集（工具 schema 与审批分级共用这一份事实源）。
 pub const ALL_METHODS: &[&str] = &[
     "navigate",
+    "preview_file",
     "back",
     "forward",
     "reload",
@@ -119,6 +120,7 @@ pub fn method_is_read_only(method: &str) -> bool {
             | "activate_tab"
             | "capabilities"
             | "page_text"
+            | "preview_file"
     )
 }
 
@@ -173,6 +175,11 @@ pub struct Point {
 #[serde(tag = "method")]
 pub enum BrowserCommand {    #[serde(rename = "navigate")]
     Navigate { url: String, tab_id: Option<String> },
+    /// 工作区文件直接渲染进浏览器（file:// 本地地址，不起服务、不走代理；
+    /// 2026-10-31：agent 验证前端产物曾无视文字指引自己起服务白烧十几轮，
+    /// 把「该怎么做」做成唯一做法）。分发层折叠成 Navigate。
+    #[serde(rename = "preview_file")]
+    PreviewFile { path: String, tab_id: Option<String> },
     #[serde(rename = "back")]
     Back { tab_id: Option<String> },
     #[serde(rename = "forward")]
@@ -317,6 +324,7 @@ impl BrowserCommand {
     pub fn tab_id(&self) -> Option<&str> {
         match self {
             BrowserCommand::Navigate { tab_id, .. }
+            | BrowserCommand::PreviewFile { tab_id, .. }
             | BrowserCommand::Back { tab_id }
             | BrowserCommand::Forward { tab_id }
             | BrowserCommand::Reload { tab_id }

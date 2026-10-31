@@ -169,15 +169,16 @@ export function messageParts(m) {
 /// thinkMs 累加；workMs/stats 取收尾那条；ts/id 留第一条。
 /// 引导消息（steered 用户消息）对合并**透明**（2026-10-31 实锤：引导在会话文件里
 /// 是真 user——模型上下文需要它，落盘不动；但展示层不能让它把同一轮拆成两半）。
-/// 标记攒起来挂到合并后的那轮（steerMarkers）；后面没等到 assistant 的原样保留。
+/// 折叠成 {type:'steer'} part 插进两段 parts 的**边界**——标记就显示在引导发生的
+/// 位置（用户拍板：不该挪到轮顶）。后面没等到 assistant 的原样保留。
 /// 打断（interrupted）是真用户气泡，照旧拆分。
 export function mergeAssistantRun(list) {
   const out = [];
-  let pending = []; // 待挂靠的引导标记（原样 user 消息）
-  const takeMarkers = () => {
-    const marks = pending.map((s) => ({ ts: s.ts, content: s.content }));
+  let pending = []; // 待插入的引导标记（原样 user 消息）
+  const takeParts = () => {
+    const parts = pending.map((s) => ({ type: 'steer', text: s.content, ts: s.ts }));
     pending = [];
-    return marks;
+    return parts;
   };
   const flushPending = () => {
     for (const s of pending) out.push(s);
@@ -191,7 +192,9 @@ export function mergeAssistantRun(list) {
     const prev = out[out.length - 1];
     if (m.role === 'assistant' && prev && prev.role === 'assistant') {
       const prevTools = prev.tools || [];
-      const mergedParts = (prev.parts && prev.parts.length ? prev.parts : legacyParts(prev)).map((p) => ({ ...p }));
+      const prevParts = (prev.parts && prev.parts.length ? prev.parts : legacyParts(prev)).map((p) => ({ ...p }));
+      const steerParts = takeParts();
+      const mergedParts = [...prevParts, ...steerParts];
       for (const p of m.parts && m.parts.length ? m.parts : legacyParts(m)) {
         mergedParts.push(
           p.type === 'tool' ? { ...p, toolIndex: prevTools.length + (p.toolIndex || 0) } : { ...p }
@@ -206,10 +209,11 @@ export function mergeAssistantRun(list) {
         thinkMs: (prev.thinkMs || 0) + (m.thinkMs || 0),
         workMs: m.workMs || prev.workMs,
         stats: m.stats || prev.stats,
-        ...(pending.length ? { steerMarkers: [...(prev.steerMarkers || []), ...takeMarkers()] } : {}),
       };
     } else if (m.role === 'assistant') {
-      out.push(pending.length ? { ...m, steerMarkers: takeMarkers() } : m);
+      const steerParts = takeParts();
+      const own = m.parts && m.parts.length ? m.parts.map((p) => ({ ...p })) : legacyParts(m);
+      out.push(steerParts.length ? { ...m, parts: [...steerParts, ...own] } : m);
     } else {
       flushPending();
       out.push(m);
@@ -231,6 +235,7 @@ export function attachToolPreview(parts, toolCallId, preview) {
 
 /// 流式渲染分块：连续的非正文（思考/工具）合成一个「过程」块，正文独立成块。
 /// 这样多步任务按真实顺序呈现：过程 → 说明文字 → 过程 → 最终回答。
+/// 引导标记（steer）也是边界：把过程块隔断，渲染成「已引导」行。
 export function buildBlocks(parts) {
   const blocks = [];
   let proc = null;
@@ -240,6 +245,9 @@ export function buildBlocks(parts) {
     if (p.type === 'content') {
       if (p.text) blocks.push({ kind: 'content', text: p.text });
       proc = null;
+    } else if (p.type === 'steer') {
+      if (proc) { blocks.push(proc); proc = null; }
+      blocks.push({ kind: 'steer', text: p.text });
     } else {
       if (!proc) {
         proc = { kind: 'process', items: [] };
@@ -251,9 +259,10 @@ export function buildBlocks(parts) {
   return blocks.filter((b) => b.kind !== 'process' || b.items.length > 0);
 }
 
-/// 完成态渲染：整轮的执行过程（思考/工具/中途说明）合成**一个**折叠过程块，
+/// 完成态渲染：整轮的执行过程（思考/工具/中途说明）折成折叠过程块，
 /// 只保留最后一段正文作为结语（用户 2026-10-30：「任务执行完毕只保留『做好了』下面的结语」）。
-/// 判断「结语」= 最后一段非空正文；它之前的全部内容都可折叠回看。
+/// 引导标记（steer）是分段边界：每个标记把前后过程各自成块，标记本身渲染成
+/// 「已引导」行——位置就是引导真实发生的地方（用户 2026-10-31 拍板）。
 export function buildCompletedView(parts) {
   const list = (parts || []).filter(
     (p) => !(p.type === 'thinking' && isNoiseThinking(p.text)) && !(p.type === 'content' && !String(p.text || '').trim())
@@ -265,15 +274,25 @@ export function buildCompletedView(parts) {
       break;
     }
   }
-  if (finalIdx < 0) {
-    return list.length ? [{ kind: 'process', items: list }] : [];
-  }
-  const before = list.slice(0, finalIdx);
-  const after = list.slice(finalIdx + 1);
   const blocks = [];
-  if (before.length) blocks.push({ kind: 'process', items: before });
-  blocks.push({ kind: 'content', text: list[finalIdx].text });
-  if (after.length) blocks.push({ kind: 'process', items: after });
+  let proc = [];
+  const flushProc = () => {
+    if (proc.length) blocks.push({ kind: 'process', items: proc });
+    proc = [];
+  };
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    if (p.type === 'steer') {
+      flushProc();
+      blocks.push({ kind: 'steer', text: p.text });
+    } else if (i === finalIdx) {
+      flushProc();
+      blocks.push({ kind: 'content', text: p.text });
+    } else {
+      proc.push(p);
+    }
+  }
+  flushProc();
   return blocks;
 }
 

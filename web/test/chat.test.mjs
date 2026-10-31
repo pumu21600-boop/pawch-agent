@@ -232,7 +232,7 @@ test('mergeAssistantRun：多步合并成一条，parts 顺序保留、toolIndex
   assert.equal(list.length, 3);
 });
 
-test('mergeAssistantRun：引导(steered)对合并透明，标记挂到轮上；打断照旧拆分', () => {
+test('mergeAssistantRun：引导(steered)对合并透明，标记插在发生位置；打断照旧拆分', () => {
   const mk = (id, ts, text, toolIndex = 0) => ({
     id,
     role: 'assistant',
@@ -243,19 +243,23 @@ test('mergeAssistantRun：引导(steered)对合并透明，标记挂到轮上；
     workMs: 0,
   });
   const steer = { id: 's1', role: 'user', content: '为什么不用内置浏览器', steered: true, ts: 150 };
-  // 引导夹在两条 assistant 中间：不拆，标记挂到合并后的轮
+  // 引导夹在两条 assistant 中间：不拆，标记插在两段 parts 的边界
   const [m] = mergeAssistantRun([mk('a1', 100, '前半。'), steer, mk('a2', 200, '后半。', 1)]);
   assert.equal(m.id, 'a1');
-  assert.deepEqual(m.parts.map((p) => p.type), ['tool', 'content', 'tool', 'content'], '同一轮不再被引导拆成两半');
-  assert.deepEqual(m.steerMarkers, [{ ts: 150, content: '为什么不用内置浏览器' }]);
-  // 多条引导都收进来
+  assert.deepEqual(
+    m.parts.map((p) => p.type),
+    ['tool', 'content', 'steer', 'tool', 'content'],
+    '同一轮不再被引导拆成两半，标记在发生位置'
+  );
+  assert.equal(m.parts[2].text, '为什么不用内置浏览器');
+  // 多条引导按序都收进来
   const [m2] = mergeAssistantRun([
     mk('b1', 100, '一。'),
     steer,
     { id: 's2', role: 'user', content: '顺便截个图', steered: true, ts: 160 },
     mk('b2', 200, '二。', 1),
   ]);
-  assert.equal(m2.steerMarkers.length, 2);
+  assert.equal(m2.parts.filter((p) => p.type === 'steer').length, 2);
   // 引导后没有 assistant（轮被取消）：原样保留，不丢
   const tail = mergeAssistantRun([mk('c1', 100, '完。'), steer]);
   assert.equal(tail.length, 2);
@@ -270,6 +274,34 @@ test('mergeAssistantRun：引导(steered)对合并透明，标记挂到轮上；
   const split = mergeAssistantRun([mk('e1', 100, '前。'), intr, mk('e2', 200, '后。', 1)]);
   assert.equal(split.length, 3, 'interrupted 不合并');
   assert.equal(split[1].interrupted, true);
+});
+
+test('steer 分块：完成态按引导位置分段，流式同样隔断', () => {
+  const parts = [
+    { type: 'tool', toolIndex: 0, name: 'write_file' },
+    { type: 'content', text: '改好了第一版。' },
+    { type: 'steer', text: '顺便把标题改成 X' },
+    { type: 'tool', toolIndex: 1, name: 'edit_file' },
+    { type: 'content', text: '标题已改，全部完成。' },
+  ];
+  const done = buildCompletedView(parts);
+  assert.deepEqual(
+    done.map((b) => b.kind),
+    ['process', 'steer', 'process', 'content'],
+    '引导前后的过程各自成块（中途说明折进过程），结语是最后一段正文'
+  );
+  assert.equal(done[1].text, '顺便把标题改成 X');
+  assert.equal(done[2].items.map((p) => p.type).join(','), 'tool', '引导后的过程块只有引导后的内容');
+  assert.equal(done[3].text, '标题已改，全部完成。');
+  const live = buildBlocks(parts);
+  assert.deepEqual(
+    live.map((b) => b.kind),
+    ['process', 'content', 'steer', 'process', 'content']
+  );
+  // 开头就是引导 / 只有引导没正文：照样渲染，不丢
+  assert.deepEqual(buildCompletedView([{ type: 'steer', text: '先想好' }]), [{ kind: 'steer', text: '先想好' }]);
+  // completedHasProcess：只有引导没有过程块 → 「已工作」走顶部独立行
+  assert.equal(completedHasProcess([{ type: 'steer', text: '先想好' }, { type: 'content', text: '答' }]), false);
 });
 
 test('partsFromStoredMessage：思考 → 正文 → 工具，工具 index 从 0 起', () => {

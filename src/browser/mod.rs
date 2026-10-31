@@ -434,6 +434,26 @@ mod tests {
         assert!(t.contains("不要再重试"), "{t}");
     }
 
+    /// preview_file：工作区文件 → file:/// URL（前端产物验证的唯一正路，不起服务）。
+    #[test]
+    fn preview_file_resolves_workspace_paths() {
+        let ws = std::env::temp_dir().join(format!("pw-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("页面.html"), "<h1>x</h1>").unwrap();
+        let u = crate::browser::command::workspace_file_url(&ws, "页面.html").unwrap();
+        assert!(u.starts_with("file:///"), "{u}");
+        assert!(u.contains("%E9%A1%B5"), "中文要百分号编码: {u}");
+        assert!(crate::browser::command::workspace_file_url(&ws, "没有.html").is_err(), "缺文件要报人话");
+        assert!(crate::browser::command::workspace_file_url(&ws, "").is_err(), "空 path 要报错");
+        assert!(crate::browser::command::workspace_file_url(&ws, ".").is_err(), "目录不收");
+        // 子目录相对路径也要能走
+        std::fs::create_dir_all(ws.join("dist")).unwrap();
+        std::fs::write(ws.join("dist").join("out.html"), "<p>y</p>").unwrap();
+        let u2 = crate::browser::command::workspace_file_url(&ws, "dist/out.html").unwrap();
+        assert!(u2.contains("dist/out.html"), "{u2}");
+        std::fs::remove_dir_all(&ws).ok();
+    }
+
     /// HTTP 错误页（4xx/5xx）与网络不通必须分开说：API 端点被浏览器 GET 打出 404 是常态，
     /// 旧文案一律「站点连不上」还附代理诊断，把用户往「坏了」上误导（2026-10-08 实锤：
     /// 面板手动开 api.stepfun.com/step_plan/ 得 404，被当成网络故障）。
@@ -813,9 +833,11 @@ mod tests {
     }
 }
 
-/// 2026-10-08 修：agent 工具侧不再放行 file://——navigate 判只读 Safe，
+/// 2026-10-08 修：agent 工具侧不放行**工作区外**的 file://——navigate 判只读 Safe，
 /// read-only 档也零审批，`file:///C:/.../id_rsa` + snapshot 即绕过 read_file
 /// 的工作区禁锢读任意本地文件。面板地址栏（用户自主）仍放行。
+/// 2026-10-31 起**工作区内**的 file:// 放行（preview_file 的产物，区内文件 read_file
+/// 本就看得到，无权限升级）；区外照旧拒。
 #[test]
 fn agent_side_navigate_blocks_file_url_but_panel_allows() {
     assert!(check_url("https://example.com/").is_ok());
@@ -823,7 +845,15 @@ fn agent_side_navigate_blocks_file_url_but_panel_allows() {
     assert!(check_url("about:blank").is_ok());
     let e = check_url("file:///C:/Users/test/.ssh/id_rsa").unwrap_err();
     assert_eq!(e.code, ErrorCode::NavigationBlocked, "{e:?}");
-    assert!(e.message.contains("面板"), "错误要指路：{e}", e = e.message);
+    assert!(e.message.contains("preview_file"), "错误要指路：{e}", e = e.message);
+    // 工作区内放行 / 区外拒绝（file_url_in_workspace 纯函数直测，不依赖进程全局工作区）
+    let ws = std::env::temp_dir().join(format!("pw-fileurl-{}", std::process::id()));
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("a.html"), "<p>x</p>").unwrap();
+    let inside = crate::browser::command::workspace_file_url(&ws, "a.html").unwrap();
+    assert!(crate::browser::command::file_url_in_workspace(&inside, &ws).is_ok(), "{inside}");
+    assert!(crate::browser::command::file_url_in_workspace("file:///C:/Windows/win.ini", &ws).is_err());
+    std::fs::remove_dir_all(&ws).ok();
     // 面板侧：用户手输本地文件放行
     assert!(check_panel_url("file:///C:/report.html").is_ok());
     assert!(check_panel_url("https://example.com/").is_ok());

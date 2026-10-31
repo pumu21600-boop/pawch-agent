@@ -6136,13 +6136,6 @@
               </span>
             {/if}
             <div class="msg-stack">
-            {#each m.steerMarkers || [] as sm}
-              <!-- 重启 rebuild 后挂回轮上的引导标记：不把同一轮拆成两半（2026-10-31） -->
-              <div class="steer-line" title="引导消息：不打断当时的对话，静默并入了那一轮">
-                <span class="steer-line-badge">已引导</span>
-                <span class="steer-line-text">{sm.content}</span>
-              </div>
-            {/each}
             <div class="bubble asst-bubble">
               {#if m.streaming && m.workStartedAt}
                 <div class="turn-bar live">
@@ -6193,7 +6186,13 @@
               {#each buildMessageBlocks(messageParts(m), m.streaming) as b, bi}
                 {@const pk = `${m.id}:${bi}`}
                 {@const open = processOpenMap[pk] !== undefined ? processOpenMap[pk] : !!m.streaming}
-                {#if b.kind === 'process'}
+                {#if b.kind === 'steer'}
+                  <!-- 引导标记在它真实发生的位置：把前后过程各自隔断（2026-10-31 用户拍板） -->
+                  <div class="steer-line" title="引导消息：不打断当时的对话，静默并入了那一轮">
+                    <span class="steer-line-badge">已引导</span>
+                    <span class="steer-line-text">{b.text}</span>
+                  </div>
+                {:else if b.kind === 'process'}
                   <div class="process" class:live={m.streaming}>
                     <button
                       class="process-head"

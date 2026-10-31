@@ -1789,6 +1789,7 @@ dependencies = [
  "toml_edit 0.22.27",
  "tower",
  "tower-http",
+ "url",
  "uuid",
  "wasmtime",
  "windows-sys 0.52.0",

@@ -68,13 +68,63 @@ pub(crate) async fn page_state(tab: &WebTab) -> Result<PageState, BrowserError> 
 /// 生成的 HTML 报告）走「网页」面板地址栏——check_panel_url 仍放行 file://。
 pub(crate) fn check_url(url: &str) -> Result<(), BrowserError> {
     if url.starts_with("http://") || url.starts_with("https://") || url == "about:blank" {
+        return Ok(());
+    }
+    if url.starts_with("file://") {
+        // 只放行**工作区内**的本地文件（preview_file 的产物）：file://+snapshot 曾被
+        // 点名是绕过 read_file 工作区禁锢读任意本地文件的路（2026-10-08 实锤），
+        // 工作区外的照旧拒——读文件有 read_file 的审批口径，浏览器不例外
+        let ws = crate::tools::workspace_root().to_path_buf();
+        if file_url_in_workspace(url, &ws).is_ok() {
+            return Ok(());
+        }
+        return Err(BrowserError::new(
+            ErrorCode::NavigationBlocked,
+            "file:// 只能打开当前工作区里的文件（预览工作区文件用 preview_file）；工作区外的本地文件不放行，要看内容用 read_file",
+        ));
+    }
+    Err(BrowserError::new(
+        ErrorCode::NavigationBlocked,
+        "地址必须以 http:// / https:// / file:// 开头（或 about:blank）；工作区文件用 preview_file 方法",
+    ))
+}
+
+/// file:/// URL 是否落在工作区根内（纯函数好单测；路径断言要 canonicalize 的老教训）。
+pub(crate) fn file_url_in_workspace(url: &str, ws: &std::path::Path) -> Result<(), String> {
+    let u = url::Url::parse(url).map_err(|_| "不是合法地址".to_string())?;
+    if u.scheme() != "file" {
+        return Err("非 file 地址".into());
+    }
+    let p = u.to_file_path().map_err(|_| "file 地址解析失败".to_string())?;
+    let p = p.canonicalize().map_err(|_| "文件不存在".to_string())?;
+    let ws_canon = ws.canonicalize().map_err(|_| "工作区不存在".to_string())?;
+    if p.starts_with(&ws_canon) {
         Ok(())
     } else {
-        Err(BrowserError::new(
-            ErrorCode::NavigationBlocked,
-            "地址必须以 http:// 或 https:// 开头（或 about:blank）；本地文件请用户在「网页」面板的地址栏打开",
-        ))
+        Err("工作区外".into())
     }
+}
+
+/// 工作区相对路径 → file:/// URL（preview_file 的纯函数部分，好单测）。
+/// canonicalize 防相对段/符号链接漂移（「路径断言要 canonicalize」的老教训）。
+pub(crate) fn workspace_file_url(ws: &std::path::Path, rel: &str) -> Result<String, String> {
+    let rel_trim = rel.trim();
+    if rel_trim.is_empty() {
+        return Err("path 不能为空：传工作区相对路径，如 index.html 或 dist/页面.html".into());
+    }
+    let canon = ws
+        .join(rel_trim)
+        .canonicalize()
+        .map_err(|_| format!("工作区里没有这个文件：{rel_trim}（先确认文件名/目录，或先把文件写出来再预览）"))?;
+    if !canon.is_file() {
+        return Err(format!("「{rel_trim}」不是文件（可能是目录），preview_file 只收文件"));
+    }
+    // Windows canonicalize 给 verbatim 路径（\\?\C:\...），url crate 不认，剥掉前缀
+    let plain = canon.to_string_lossy();
+    let plain = plain.strip_prefix(r"\\?\").unwrap_or(&plain);
+    url::Url::from_file_path(plain)
+        .map(|u| u.to_string())
+        .map_err(|_| format!("转本地地址失败：{plain} 不是标准绝对路径"))
 }
 
 /// 在标签页里导航并等加载完成；返回超时提示（None=正常）。会话死了返回 Err。
@@ -239,6 +289,16 @@ pub async fn command(args: &str, max_chars: usize) -> Result<String, String> {
         return Err(BROWSER_OFF_MSG.to_string());
     }
     let cmd = commands::parse(args).map_err(String::from)?;
+    // preview_file 在入口折算成 navigate（file:/// 工作区文件地址）：后面的标签页解析、
+    // 落点检查、快照全走同一条路，零分叉
+    let cmd = match cmd {
+        BrowserCommand::PreviewFile { path, tab_id } => {
+            let url = workspace_file_url(&crate::tools::workspace_root().to_path_buf(), &path)
+                .map_err(|e| BrowserError::new(ErrorCode::ExecutionError, e))?;
+            BrowserCommand::Navigate { url, tab_id }
+        }
+        other => other,
+    };
     let out = dispatch(cmd, max_chars).await.map_err(String::from);
     // agent 碰过浏览器（不论成败）就记时间戳——面板据此自动唤起右侧栏（用户要求）。
     // 与面板显隐分开：agent 的触碰只唤醒界面，不直接把 webview 弹到聊天区上空。
@@ -356,6 +416,11 @@ pub(crate) async fn dispatch(cmd: BrowserCommand, max_chars: usize) -> Result<St
         .map_err(|e| BrowserError::new(ErrorCode::BackendUnavailable, format!("恢复挂起标签页失败: {e}")))?;
 
     match cmd {
+        // preview_file 在入口（command）已折算成 Navigate；这里兜底防御
+        BrowserCommand::PreviewFile { .. } => Err(BrowserError::new(
+            ErrorCode::ExecutionError,
+            "preview_file 内部折叠失败，请直接重试",
+        )),
         BrowserCommand::Navigate { url, .. } => {
             check_url(&url)?;
             log("browser.navigate", json!({ "url": url, "tab": tab.id }));
@@ -1058,7 +1123,9 @@ pub(crate) fn diagnosis_hint(diag: &ProxyDiagnosis) -> String {
             "另外：系统代理当前已开启但仍不通——检查代理客户端的分流规则（该站点是否被分到了直连）。".to_string()
         }
         ProxyDiagnosis::ClientAliveSwitchOff(server) => format!(
-            "另外：检测到本机代理客户端在运行（{server}）但系统代理开关是关闭的——浏览器跟随系统代理，所以直连不通的站点会超时；打开代理客户端的「系统代理」或 TUN 模式即可。"
+            "另外：检测到本机有代理客户端在运行（注册表里留着 {server} 这个地址），但系统代理开关是关闭的——\
+             现在没有任何流量在走 {server}，浏览器是直连，直连不通的站点才会超时；\
+             打开代理客户端的「系统代理」或 TUN 模式即可，打开后外网流量才借道它出去。"
         ),
         ProxyDiagnosis::Silent => String::new(),
     }
