@@ -261,8 +261,8 @@ export function buildBlocks(parts) {
 
 /// 完成态渲染：整轮的执行过程（思考/工具/中途说明）折成折叠过程块，
 /// 只保留最后一段正文作为结语（用户 2026-10-30：「任务执行完毕只保留『做好了』下面的结语」）。
-/// 引导标记（steer）是分段边界：每个标记把前后过程各自成块，标记本身渲染成
-/// 「已引导」行——位置就是引导真实发生的地方（用户 2026-10-31 拍板）。
+/// 引导标记（steer）**跟着过程一起折叠**（2026-10-31 用户拍板）：留在 items 里保持
+/// 真实位置（展开后行体内可见），不把折叠行劈成两半——摘要行出「已引导」小徽标。
 export function buildCompletedView(parts) {
   const list = (parts || []).filter(
     (p) => !(p.type === 'thinking' && isNoiseThinking(p.text)) && !(p.type === 'content' && !String(p.text || '').trim())
@@ -282,10 +282,7 @@ export function buildCompletedView(parts) {
   };
   for (let i = 0; i < list.length; i++) {
     const p = list[i];
-    if (p.type === 'steer') {
-      flushProc();
-      blocks.push({ kind: 'steer', text: p.text });
-    } else if (i === finalIdx) {
+    if (i === finalIdx) {
       flushProc();
       blocks.push({ kind: 'content', text: p.text });
     } else {

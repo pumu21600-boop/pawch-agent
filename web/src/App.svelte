@@ -6163,12 +6163,13 @@
                 {@const pk = `${m.id}:${bi}`}
                 {@const open = processOpenMap[pk] !== undefined ? processOpenMap[pk] : !!m.streaming}
                 {#if b.kind === 'steer'}
-                  <!-- 引导标记在它真实发生的位置：把前后过程各自隔断（2026-10-31 用户拍板） -->
+                  <!-- 流式中的引导：真实位置隔断（完成态跟随过程折叠成摘要徽标） -->
                   <div class="steer-line" title="引导消息：不打断当时的对话，静默并入了那一轮">
                     <span class="steer-line-badge">已引导</span>
                     <span class="steer-line-text">{b.text}</span>
                   </div>
                 {:else if b.kind === 'process'}
+                  {@const steerCount = b.items.filter((x) => x.type === 'steer').length}
                   <div class="process" class:live={m.streaming}>
                     <button
                       class="process-head"
@@ -6177,6 +6178,7 @@
                     >
                       <svg class="process-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 13.7 9l5.5 1.7-5.5 1.7L12 18l-1.7-5.6L4.8 10.7 10.3 9 12 3.5Z"/><path d="m19 15.5.7 2.2 2.3.8-2.3.8-.7 2.2"/></svg>
                       <span class="process-title">{processSummary(b.items, !m.streaming && bi === 0 ? m.workMs : 0)}</span>
+                      {#if steerCount}<span class="process-steer-chip" title="这一段里有 {steerCount} 条引导静默并入">已引导{steerCount > 1 ? ` ×${steerCount}` : ''}</span>{/if}
                       {#if processIsLive(b.items)}<span class="process-live"><span class="live-dot"></span></span>{/if}
                       <svg class="process-caret" class:open={open} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
                     </button>
@@ -6184,7 +6186,13 @@
                       <div class="process-body">
                         {#each b.items as it, ii}
                           {@const ik = `${pk}:${ii}`}
-                          {#if it.type === 'thinking'}
+                          {#if it.type === 'steer'}
+                            <!-- 展开后引导行出现在真实位置（折叠时只看摘要徽标） -->
+                            <div class="steer-line" title="引导消息：不打断当时的对话，静默并入了那一轮">
+                              <span class="steer-line-badge">已引导</span>
+                              <span class="steer-line-text">{it.text}</span>
+                            </div>
+                          {:else if it.type === 'thinking'}
                             {@const tOpen = thinkOpenMap[ik] !== undefined ? thinkOpenMap[ik] : !it.done}
                             <div class="think-item">
                               <button
@@ -9680,6 +9688,17 @@
     border-radius: 8px;
     background: color-mix(in srgb, var(--accent, #4a9) 10%, transparent);
     color: var(--accent, #4a9);
+  }
+  /* 折叠行摘要上的「已引导」小徽标：与引导行徽标同色系，字号随摘要行缩小 */
+  .process-steer-chip {
+    flex: none;
+    padding: 1px 7px;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--accent, #4a9) 10%, transparent);
+    color: var(--accent, #4a9);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
   .steer-line-text {
     overflow: hidden;
