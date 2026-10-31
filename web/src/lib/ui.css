@@ -93,22 +93,6 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* 细滚动条（WebKit/WebView2）：主滚动区统一观感 */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--g4) 72%, transparent);
-  border-radius: 8px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--g4);
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
 #app {
   height: 100vh;
 }
@@ -131,21 +115,16 @@ body {
   opacity: 0.5;
   cursor: default;
 }
-/* 主按钮=品牌行动色（弹窗里的确定/主操作）：两个主题下同值，白字保证对比度 */
+/* 主按钮不搞亮底高亮：用略强的底色+描边+字重表达「主要动作」，两个主题下都不刺眼 */
 .btn.primary {
-  background: var(--brand);
-  border-color: var(--brand);
-  color: var(--brand-ink);
+  background: var(--g3);
+  border-color: var(--g5);
+  color: var(--g7);
   font-weight: 650;
 }
 .btn.primary:hover {
-  background: var(--brand-hover);
-  border-color: var(--brand-hover);
-}
-.btn.primary:disabled {
-  background: var(--g3);
-  border-color: var(--g3);
-  color: var(--g5);
+  background: var(--g4);
+  border-color: var(--g6);
 }
 .btn.danger {
   background: var(--g2);
