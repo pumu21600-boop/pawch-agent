@@ -154,3 +154,69 @@ async fn unknown_api_route_is_404_not_html() {
     assert_eq!(status, StatusCode::NOT_FOUND, "未知 API 必须是 404，不能掉进 SPA 兜底");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 发一个 POST（空体 + 合法 Host），返回 (状态码, JSON)。
+async fn post(app: &Router, uri: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("host", "127.0.0.1:5173")
+        .body(Body::empty())
+        .expect("构造请求");
+    let resp = app.clone().oneshot(req).await.expect("router 不应崩溃");
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.expect("读响应体").to_bytes();
+    let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+/// POST /api/checkpoints（手动重拍基线）契约：非 git 工作区 → 200 + ok:false + 人话 note
+/// （拍不了基线不是错误）；git 仓库（有已跟踪文件）→ ok:true + 检查点归属带上的会话。
+/// 产物/git 面板「基线过期 → 重新以当前状态为起点」走的就是这个端点（2026-10-31）。
+#[tokio::test]
+async fn manual_checkpoint_endpoint_contract() {
+    let root = test_root("manual-cp");
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).expect("建工作区");
+    let prev = crate::tools::workspace_root();
+    crate::tools::set_workspace_root(&ws);
+
+    // 非 git 工作区：拍不了基线要 200 + 人话，不能 500 糊前端
+    let (status, v) = post(&app(&root), "/api/checkpoints?session=s-manual").await;
+    assert_eq!(status, StatusCode::OK, "非 git 也应 200: {v}");
+    assert_eq!(v["ok"], Value::Bool(false), "{v}");
+    assert!(v["note"].as_str().map(|s| !s.is_empty()).unwrap_or(false), "要给人话: {v}");
+
+    // git 仓库（有已跟踪文件）→ ok:true，检查点归属带上的会话
+    if let Ok(bin) = crate::tools::git_exe() {
+        let git = |args: &[&str]| {
+            std::process::Command::new(&bin)
+                .args(args)
+                .current_dir(&ws)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+        };
+        let _ = git(&["init", "--quiet"]);
+        std::fs::write(ws.join("a.txt"), "v1\n").expect("写文件");
+        let _ = git(&["add", "a.txt"]);
+        let _ = git(&["commit", "--quiet", "-m", "init"]);
+        let (status2, v2) = post(&app(&root), "/api/checkpoints?session=s-manual").await;
+        assert_eq!(status2, StatusCode::OK, "{v2}");
+        assert_eq!(v2["ok"], Value::Bool(true), "{v2}");
+        assert!(!v2["checkpoint"]["id"].as_str().unwrap_or("").is_empty(), "{v2}");
+        assert_eq!(v2["checkpoint"]["session"], Value::String("s-manual".into()), "{v2}");
+
+        // 无变更再拍：checkpoint 的 None 语义——不算失败，直接以最近检查点为起点
+        let (status3, v3) = post(&app(&root), "/api/checkpoints?session=s-manual").await;
+        assert_eq!(status3, StatusCode::OK, "{v3}");
+        assert_eq!(v3["ok"], Value::Bool(true), "{v3}");
+        assert_eq!(v3["checkpoint"]["id"], v2["checkpoint"]["id"], "无变更应回指最近检查点: {v3}");
+        assert!(v3["note"].as_str().map(|s| !s.is_empty()).unwrap_or(false), "无变更要给人话: {v3}");
+    }
+
+    crate::tools::set_workspace_root(&prev);
+    let _ = std::fs::remove_dir_all(&root);
+}

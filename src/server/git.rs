@@ -111,6 +111,42 @@ pub(super) async fn git_commit(
     }
 }
 
+/// POST /api/checkpoints[?session=<id>] —— 手动重拍基线（「重新以当前状态为起点」）。
+/// 场景：产物/git 面板的基线过期——基线里的目录已被挪走/删掉，任务档清单成鬼影
+/// （stale_subtree_warning 触发）。用户点一下，以当前工作区状态为新起点，清单回到
+/// 真实增量。会话归属：带 session 记到该会话（重拍是用户显式动作，归属当前会话）。
+pub(super) async fn create_checkpoint(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<Value>) {
+    let _ = &state;
+    let session = q.get("session").map(|s| s.trim().to_string()).unwrap_or_default();
+    let ws = crate::tools::workspace_root().to_path_buf();
+    let ws_for_list = ws.clone();
+    match tokio::task::spawn_blocking(move || crate::recovery::checkpoint(&ws, "手动重拍基线", &session)).await {
+        Ok(Ok(Some(cp))) => (StatusCode::OK, Json(json!({
+            "ok": true,
+            "checkpoint": { "id": cp.id, "ts": cp.ts, "session": cp.session }
+        }))),
+        // 无变更（checkpoint 的 None 语义：工作区相对影子仓库 HEAD 没有差异）不算失败——
+        // 最近一个已有检查点本身就代表当前状态，直接拿它当新基线；一个检查点都没有
+        // 或非 git 工作区，才真的是「拍不了基线」，给人话。
+        Ok(Ok(None)) => match tokio::task::spawn_blocking(move || crate::recovery::list(&ws_for_list, 1)).await {
+            Ok(Ok(list)) if !list.is_empty() => {
+                let cp = &list[0];
+                (StatusCode::OK, Json(json!({
+                    "ok": true,
+                    "note": "工作区自上个检查点后没有新改动，直接以它为起点。",
+                    "checkpoint": { "id": cp.id, "ts": cp.ts, "session": cp.session }
+                })))
+            }
+            _ => (StatusCode::OK, Json(json!({ "ok": false, "note": "工作区没有可跟踪的 git 文件，拍不了基线" }))),
+        },
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+    }
+}
+
 /// GET /api/checkpoints[?session=<id>] —— 影子仓库检查点列表（新→旧，最多 20 个）。
 /// 带 session 时额外返回 `mine`：该会话自己的检查点（改动条基线优先取它）。
 pub(super) async fn list_checkpoints(

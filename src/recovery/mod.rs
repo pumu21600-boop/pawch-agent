@@ -186,7 +186,13 @@ fn tracked_files(bin: &Path, ws: &Path) -> anyhow::Result<Vec<PathBuf>> {
             continue;
         }
         let full = ws.join(&rel);
-        let Ok(meta) = std::fs::metadata(&full) else { continue };
+        // 工作区里已不存在（用户删掉/挪走）：**必须保留**进 pathspec——影子仓库要如实记
+        // 删除。此前在这里被跳过，删除永远进不了基线，鬼影文件一代代往后传
+        // （2026-10-31 用户实锤「产物不是当前工作区的」根因）。
+        let Ok(meta) = std::fs::metadata(&full) else {
+            files.push(rel);
+            continue;
+        };
         if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
             continue;
         }
@@ -264,12 +270,37 @@ pub fn checkpoint(ws: &Path, reason: &str, session_id: &str) -> anyhow::Result<O
         &bin,
         Some(&gitdir),
         ws,
-        &["add", "--pathspec-from-file", &spec.to_string_lossy(), "--pathspec-file-nul"],
+        // -A：删除如实入基线的双保险（pathspec 含已删除路径时，个别形态下默认 add
+        // 会「did not match any files」fatal）。
+        &["add", "-A", "--pathspec-from-file", &spec.to_string_lossy(), "--pathspec-file-nul"],
     );
     let _ = std::fs::remove_file(&spec);
-    let out = add?;
+    let mut out = add?;
     if !out.status.success() {
-        return Err(anyhow!("git add 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        // 容错：pathspec 里个别路径匹配不到 = 该文件从未入过任何基线（影子 index 里
+        // 也没有）且工作区已删——它的「删除」不构成对任何基线的差异，剔除后重试一次。
+        // 真异常（权限/仓库损坏）重试后仍会原样报错。
+        let existing: Vec<PathBuf> = files.iter().filter(|f| ws.join(f).exists()).cloned().collect();
+        if existing.len() == files.len() {
+            return Err(anyhow!("git add 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        let spec2 = std::env::temp_dir().join(format!("agent-cp-{}.nul", uuid::Uuid::new_v4().simple()));
+        let mut buf2 = Vec::new();
+        for f in &existing {
+            buf2.extend_from_slice(f.to_string_lossy().as_bytes());
+            buf2.push(0);
+        }
+        std::fs::write(&spec2, &buf2).context("写 pathspec 文件失败")?;
+        out = git(
+            &bin,
+            Some(&gitdir),
+            ws,
+            &["add", "-A", "--pathspec-from-file", &spec2.to_string_lossy(), "--pathspec-file-nul"],
+        )?;
+        let _ = std::fs::remove_file(&spec2);
+        if !out.status.success() {
+            return Err(anyhow!("git add 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
     }
 
     // 无变更不造空提交
@@ -1170,6 +1201,46 @@ mod tests {
         assert!(
             stale_subtree_warning(w, RepoOrigin::Shadow, &cp.id, &files).is_none(),
             "顶层目录还在就不该警告"
+        );
+    }
+
+    /// 2026-10-31 用户实锤「产物不是当前工作区的」根因回归：默认 `git add` 忽略工作区
+    /// 删除——用户在文件管理器删掉/挪走目录后拍的新检查点根本没把删除记进影子仓库，
+    /// 鬼影文件一代代往后传，产物面板永久挂着幽灵条目。`add -A` 后：删除必须入基线，
+    /// 以新基线再看改动就干净了（重拍 = 以当前状态为起点）。
+    #[test]
+    fn checkpoint_records_worktree_deletions() {
+        if !git_have() {
+            return;
+        }
+        let ws = temp_ws("cpdelete");
+        let w = ws.path();
+        ws.git(&["init", "--quiet"]);
+        std::fs::write(w.join("a.txt"), "v1\n").unwrap();
+        std::fs::create_dir_all(w.join("src")).unwrap();
+        std::fs::write(w.join("src/x.txt"), "x\n").unwrap();
+        ws.git(&["add", "-A"]);
+
+        let cp1 = checkpoint(w, "任务起点", "sess-del").unwrap().expect("应有检查点");
+        // 文件管理器式删除（不 git rm）→ 再拍基线
+        std::fs::remove_file(w.join("src/x.txt")).unwrap();
+        let cp2 = checkpoint(w, "手动重拍基线", "sess-del").unwrap().expect("删除必须能进基线");
+
+        // 以 cp2 为基线：清单必须干净（无幽灵 D）——重拍语义成立
+        let files2 = changed_files(w, RepoOrigin::Shadow, &cp2.id).unwrap();
+        assert!(
+            !files2.iter().any(|f| f.path == "src/x.txt"),
+            "新基线后再看改动不得再有 src/x.txt 鬼影: {files2:?}"
+        );
+        assert!(
+            stale_subtree_warning(w, RepoOrigin::Shadow, &cp2.id, &files2).is_none(),
+            "新基线下不该再有陈旧警告"
+        );
+        // 以 cp1 为基线：删除如实报出（对照：删除确实被记录了）
+        let files1 = changed_files(w, RepoOrigin::Shadow, &cp1.id).unwrap();
+        assert!(
+            files1.iter().any(|f| f.status == 'D' && f.path == "src/x.txt"),
+            "相对旧基线的删除要如实列出: {files1:?}"
         );
     }
 }

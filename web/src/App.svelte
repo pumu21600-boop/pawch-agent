@@ -497,6 +497,9 @@
       rpFiles = [];
       rpArtifactsNote = '';
       rpWarn = '';
+      manualBaseline = ''; // 重拍的基线只属于当时的会话/工作区，切走即作废
+      rpStale = false;
+      rvStale = false;
       if (rpTab === 'git') loadReview();
       else if (rpTab === 'artifacts') loadArtifacts();
     } catch (e) {
@@ -1185,6 +1188,14 @@
   let rvWarn = '';
   // 产物面板同源警告（与 rvWarn 同一句话，两个面板各自展示）
   let rpWarn = '';
+  // 基线过期（2026-10-31 用户实锤「产物不是当前工作区的」）：stale 警告触发时任务档
+  // 清单全是基线残留鬼影，不再展示，给「重新以当前状态为起点」按钮重拍
+  let rpStale = false;
+  let rvStale = false;
+  let rpStaleCount = 0;
+  let rvStaleCount = 0;
+  // 用户手动重拍的基线：优先级压过消息流里的旧检查点（会话/工作区切换时清掉）
+  let manualBaseline = '';
   // 打开 git 面板并把某个文件展开（产物行「审查」按钮用；变更条撤了，入口只剩产物行）。
   // 审查不是另开的 diff 标签，就是面板里那一行展开。
   function openReviewDiff(path, baseline) {
@@ -1250,6 +1261,12 @@
       } else {
         rvFiles = r.files || [];
         rvWarn = r.warning || '';
+        // 基线过期同产物面板：隐藏鬼影清单，给重拍出口
+        rvStale = !!(r.warning && rvFiles.length);
+        if (rvStale) {
+          rvStaleCount = rvFiles.length;
+          rvFiles = [];
+        }
       }
     } catch (e) {
       rvFiles = [];
@@ -2085,6 +2102,8 @@
   /// 产物面板假空。会话确实没有检查点（早于 2026-10-02 非 git 工作区修复前跑的）
   /// 就明说没有基线，别拿别人的起点充数。
   async function resolveBaseline() {
+    // 用户手动重拍的基线最优先（基线过期后点「重新以当前状态为起点」就是它）
+    if (manualBaseline) return { id: manualBaseline, note: '' };
     const inStream = currentBaseline();
     if (inStream) return { id: inStream, note: '' };
     try {
@@ -2113,12 +2132,44 @@
       const r = await fetch(`/api/changes?baseline=${encodeURIComponent(baseline)}`).then((x) => x.json());
       rpFiles = r.files || [];
       rpWarn = r.warning || '';
+      // 基线过期：清单全是基线残留鬼影，隐藏并给「重拍基线」出口（2026-10-31 用户实锤）
+      rpStale = !!(r.warning && rpFiles.length);
+      if (rpStale) {
+        rpStaleCount = rpFiles.length;
+        rpFiles = [];
+      }
       if (r.error) rpArtifactsNote = `读取失败: ${r.error}`;
     } catch (e) {
       rpFiles = [];
       rpArtifactsNote = `读取失败: ${e.message || e}`;
     }
     rpLoading = false;
+  }
+
+  // 手动重拍基线：POST /api/checkpoints 以当前工作区状态为新起点，产物/git 面板回到真实增量
+  async function rebaseline() {
+    const q = currentSessionId ? `?session=${encodeURIComponent(currentSessionId)}` : '';
+    try {
+      const r = await fetch('/api/checkpoints' + q, { method: 'POST' }).then((x) => x.json());
+      if (r.error) {
+        rpArtifactsNote = `重拍基线失败: ${r.error}`;
+        return;
+      }
+      if (!r.ok) {
+        rpArtifactsNote = r.note || '拍不了基线';
+        return;
+      }
+      manualBaseline = r.checkpoint.id;
+      rvBaseline = r.checkpoint.id;
+      rpStale = false;
+      rvStale = false;
+      // 无变更重拍：服务端会带人话（直接以最近检查点为起点），空清单时有处可说
+      rpArtifactsNote = r.note || '';
+      loadArtifacts();
+      if (rpTab === 'git') loadReview();
+    } catch (e) {
+      rpArtifactsNote = `重拍基线失败: ${e.message || e}`;
+    }
   }
 
   // —— 右侧标签页：增 / 关 / 激活 / 文件预览标签 ——
@@ -3714,6 +3765,9 @@
       rpFiles = [];
       rpArtifactsNote = '';
       rpWarn = '';
+      manualBaseline = ''; // 重拍的基线只属于当时的会话/工作区，切走即作废
+      rpStale = false;
+      rvStale = false;
       if (rpTab === 'git') loadReview();
       else if (rpTab === 'artifacts') loadArtifacts();
     } catch (e) {
@@ -6852,12 +6906,19 @@
           {#each rpVisibleTabs as t (t.key)}
             <div class="rp-pane" class:hidden={t.key !== rpTab}>
               {#if t.kind === 'artifacts'}
-                {#if rpWarn}
+                {#if rpStale}
+                  <!-- 基线过期（2026-10-31 用户实锤）：清单全是基线残留鬼影，隐藏 + 给重拍出口 -->
+                  <div class="rv-warn">{rpWarn}</div>
+                  <div class="rp-stale-note">基线已过期，已隐藏 {rpStaleCount} 个基线残留条目（都不是当前工作区里的改动）。</div>
+                  <div class="rp-stale-act"><button class="btn primary" on:click={rebaseline}>重新以当前状态为起点</button></div>
+                {:else if rpWarn}
                   <!-- 与 git 面板同源的基线陈旧警告：目录被挪走造成的幽灵删除 -->
                   <div class="rv-warn">{rpWarn}</div>
                 {/if}
                 {#if rpLoading}
                   <div class="trace-empty">加载中…</div>
+                {:else if rpStale}
+                  <!-- 清单已隐藏，只留上面的警告与重拍按钮 -->
                 {:else if !rpFiles.length}
                   <div class="rp-empty">{rpArtifactsNote || '本任务还没有产物。'}<br />agent 修改/创建文件后，这里会列出改动清单（相对本次任务起点）。</div>
                 {:else}
@@ -6919,7 +6980,12 @@
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12a7 7 0 1 1-2.05-4.95" /><path d="M19 3.5V7h-3.5" /></svg>
                     </button>
                   </div>
-                  {#if rvWarn}
+                  {#if rvStale}
+                    <!-- 基线过期（2026-10-31 用户实锤）：任务档清单全是基线残留鬼影，隐藏 + 重拍出口 -->
+                    <div class="rv-warn">{rvWarn}</div>
+                    <div class="rp-stale-note">基线已过期，已隐藏 {rvStaleCount} 个基线残留条目（都不是当前工作区里的改动）。</div>
+                    <div class="rp-stale-act"><button class="btn primary" on:click={rebaseline}>重新以当前状态为起点</button></div>
+                  {:else if rvWarn}
                     <!-- 基线陈旧警告（后端 stale_subtree_warning）：基线里的顶层目录
                          已不在当前工作区，清单里它的「删除」很可能是目录被挪走造成的 -->
                     <div class="rv-warn">{rvWarn}</div>
@@ -6947,6 +7013,8 @@
                     <div class="trace-empty">加载中…</div>
                   {:else if rvError && !rvFiles.length}
                     <div class="rp-empty">{rvError}</div>
+                  {:else if rvStale}
+                    <!-- 清单已隐藏，警告与重拍按钮在上面 -->
                   {:else if !rvFiles.length}
                     <div class="rv-empty">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M8.5 12h7" /></svg>
@@ -10621,6 +10689,20 @@
     background: color-mix(in srgb, var(--tint-orange-fg) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--tint-orange-fg) 35%, transparent);
     border-radius: 6px;
+  }
+  /* 基线过期态：说明行 + 重拍按钮（产物/git 两面板共用） */
+  .rp-stale-note {
+    margin: 8px 10px 0;
+    padding: 0 2px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--g5);
+  }
+  .rp-stale-act {
+    margin: 10px;
+  }
+  .rp-stale-act .btn {
+    width: 100%;
   }
   .commit-msg {
     width: 100%;
