@@ -2109,14 +2109,26 @@
   /// 早于该起点的改动（如上一轮会话造的 test.pdf）全被算成「基线里已有的」——
   /// 产物面板假空。会话确实没有检查点（早于 2026-10-02 非 git 工作区修复前跑的）
   /// 就明说没有基线，别拿别人的起点充数。
-  async function resolveBaseline() {
+  async function resolveBaseline(opts = {}) {
     // 用户手动重拍的基线最优先（基线过期后点「重新以当前状态为起点」就是它）
     if (manualBaseline) return { id: manualBaseline, note: '' };
-    const inStream = currentBaseline();
-    if (inStream) return { id: inStream, note: '' };
+    if (!opts.sessionFirst) {
+      const inStream = currentBaseline();
+      if (inStream) return { id: inStream, note: '' };
+    }
     try {
       const q = currentSessionId ? `?session=${encodeURIComponent(currentSessionId)}` : '';
       const r = await fetch(`/api/checkpoints${q}`).then((r) => r.json());
+      // 产物面板（sessionFirst）取会话**最早**的检查点=会话起点：「这个会话产出过什么」
+      // 按整条会话算。危险工具的执行前快照会把 mine 刷爆（2026-10-31 实锤：16 个全是
+      // shell/edit 快照），最新一条只是最后一个任务的切片——用它当基线，会话早先的
+      // 产物全部隐身（用户实锤「切回产生 index.html 的会话看不到产物」）。
+      if (opts.sessionFirst) {
+        if (r.first && r.first.id) return { id: r.first.id, note: '' };
+        const mineAll = r.mine || [];
+        if (mineAll.length) return { id: mineAll[mineAll.length - 1].id, note: '' };
+        return { id: '', note: currentSessionId ? '该会话运行时还没有检查点（产物归因需要任务起点快照）' : '新对话还没有任务记录' };
+      }
       const mine = (r.mine || [])[0];
       if (mine) return { id: mine.id, note: '' };
       return { id: '', note: currentSessionId ? '该会话运行时还没有检查点（产物归因需要任务起点快照）' : '新对话还没有任务记录' };
@@ -2128,7 +2140,8 @@
   async function loadArtifacts() {
     rpLoading = true;
     rpWarn = '';
-    const { id: baseline, note } = await resolveBaseline();
+    // 产物=整条会话的产出，基线取会话起点（最早检查点），不是最后一个任务的切片
+    const { id: baseline, note } = await resolveBaseline({ sessionFirst: true });
     if (!baseline) {
       rpFiles = [];
       rpArtifactsNote = note || '本任务还没有产物。';

@@ -181,11 +181,12 @@ async fn manual_checkpoint_endpoint_contract() {
     let prev = crate::tools::workspace_root();
     crate::tools::set_workspace_root(&ws);
 
-    // 非 git 工作区：拍不了基线要 200 + 人话，不能 500 糊前端
+    // 非 git 且空的起步工作区：第一拍 = 空树基线（2026-10-31 新语义——空起步也要有
+    // 任务起点，之后产出的一切相对它都是新增；「拍不了基线」只剩 git 本身坏掉时）
     let (status, v) = post(&app(&root), "/api/checkpoints?session=s-manual").await;
     assert_eq!(status, StatusCode::OK, "非 git 也应 200: {v}");
-    assert_eq!(v["ok"], Value::Bool(false), "{v}");
-    assert!(v["note"].as_str().map(|s| !s.is_empty()).unwrap_or(false), "要给人话: {v}");
+    assert_eq!(v["ok"], Value::Bool(true), "空起步要有空树基线: {v}");
+    let id_empty = v["checkpoint"]["id"].clone();
 
     // git 仓库（有已跟踪文件）→ ok:true，检查点归属带上的会话
     if let Ok(bin) = crate::tools::git_exe() {
@@ -215,6 +216,15 @@ async fn manual_checkpoint_endpoint_contract() {
         assert_eq!(v3["ok"], Value::Bool(true), "{v3}");
         assert_eq!(v3["checkpoint"]["id"], v2["checkpoint"]["id"], "无变更应回指最近检查点: {v3}");
         assert!(v3["note"].as_str().map(|s| !s.is_empty()).unwrap_or(false), "无变更要给人话: {v3}");
+
+        // first = 该会话最早的检查点（产物面板基线语义，2026-10-31 实锤：危险工具快照
+        // 会把列表刷爆，产物面板拿「最新」当基线=会话早先的产物全部隐身）
+        std::fs::write(ws.join("a.txt"), "v2\n").expect("改文件");
+        let (_s4, v4) = post(&app(&root), "/api/checkpoints?session=s-manual").await;
+        assert_eq!(v4["ok"], Value::Bool(true), "{v4}");
+        let (gs, gv) = get(&app(&root), "/api/checkpoints?session=s-manual").await;
+        assert_eq!(gs, StatusCode::OK);
+        assert_eq!(gv["first"]["id"], id_empty, "first 应为该会话最早的检查点（空起步基线）: {gv}");
     }
 
     crate::tools::set_workspace_root(&prev);

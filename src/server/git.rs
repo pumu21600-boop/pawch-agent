@@ -147,8 +147,11 @@ pub(super) async fn create_checkpoint(
     }
 }
 
-/// GET /api/checkpoints[?session=<id>] —— 影子仓库检查点列表（新→旧，最多 20 个）。
-/// 带 session 时额外返回 `mine`：该会话自己的检查点（改动条基线优先取它）。
+/// GET /api/checkpoints[?session=<id>] —— 影子仓库检查点列表（新→旧，展示最多 20 个）。
+/// 带 session 时额外返回 `mine`（该会话自己的检查点，改动条基线取它）与 `first`
+/// （该会话**最早**的检查点=会话起点）。产物面板必须用 `first`：危险工具的执行前
+/// 快照会把检查点列表刷爆（2026-10-31 实锤：一个会话 16 个全是 shell/edit 快照，
+/// 任务起点被挤出 20 窗口，产物面板拿「最新快照」当基线=会话早先的产物全部隐身）。
 pub(super) async fn list_checkpoints(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -156,10 +159,12 @@ pub(super) async fn list_checkpoints(
     let _ = &state;
     let want = q.get("session").map(|s| s.trim().to_string()).unwrap_or_default();
     let ws = crate::tools::workspace_root().to_path_buf();
-    match tokio::task::spawn_blocking(move || crate::recovery::list(&ws, 20)).await {
+    match tokio::task::spawn_blocking(move || crate::recovery::list(&ws, 500)).await {
         Ok(Ok(list)) => {
-            let mine: Vec<_> = list.iter().filter(|c| !want.is_empty() && c.session == want).cloned().collect();
-            (StatusCode::OK, Json(json!({ "checkpoints": list, "mine": mine })))
+            let mine_all: Vec<_> = list.iter().filter(|c| !want.is_empty() && c.session == want).cloned().collect();
+            let first = mine_all.last().cloned();
+            let mine_top: Vec<_> = mine_all.iter().take(20).cloned().collect();
+            (StatusCode::OK, Json(json!({ "checkpoints": list.iter().take(20).cloned().collect::<Vec<_>>(), "mine": mine_top, "first": first })))
         }
         // 仓库还没有任何提交（git log fatal: does not have any commits yet）不是错误，
         // 是空态——空清单 + 人话备注，别 500 糊前端一脸

@@ -254,7 +254,30 @@ pub fn checkpoint(ws: &Path, reason: &str, session_id: &str) -> anyhow::Result<O
     // 真仓库本身得是个 git 仓库（ls-files 能跑通）
     let files = tracked_files(&bin, ws)?;
     if files.is_empty() {
-        return Ok(None);
+        // 空工作区起步的会话：第一拍留一个**空树提交**当任务起点——之后产出的一切
+        // 都能以它为基线如实显示为新增（2026-10-31 实锤：测 工作区空起步，任务起点
+        // 被当成「无变更」跳过，产物面板只能拿半路的工具快照当基线，会话产物全部
+        // 隐身）。已有提交之后的空拍维持 None（无变更不造空提交）。
+        let has_head = git(&bin, Some(&gitdir), ws, &["rev-parse", "--verify", "HEAD"])
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if has_head {
+            return Ok(None);
+        }
+        let sid0 = session_id.trim();
+        let msg0 = if sid0.is_empty() {
+            format!("checkpoint: {}", one_line(reason, 120))
+        } else {
+            format!("checkpoint: {}\n\nAgent-Session: {}", one_line(reason, 120), sid0)
+        };
+        git_ok(&bin, Some(&gitdir), ws, &["commit", "--quiet", "--allow-empty", "-m", &msg0])?;
+        let id0 = git_ok(&bin, Some(&gitdir), ws, &["rev-parse", "HEAD"])?;
+        return Ok(Some(Checkpoint {
+            id: id0,
+            ts: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            reason: one_line(reason, 200),
+            session: sid0.to_string(),
+        }));
     }
 
     // pathspec 走文件，防 Windows 命令行 8191 字符上限
@@ -1202,6 +1225,29 @@ mod tests {
             stale_subtree_warning(w, RepoOrigin::Shadow, &cp.id, &files).is_none(),
             "顶层目录还在就不该警告"
         );
+    }
+
+    /// 空工作区起步的会话：第一拍留空树提交当任务起点；之后产出的一切相对它都是新增
+    /// （2026-10-31 实锤：测 工作区空起步，任务起点被当「无变更」跳过，产物面板只能
+    /// 拿半路工具快照当基线，index.html 等会话产物全部隐身）。
+    #[test]
+    fn checkpoint_empty_start_records_baseline() {
+        if !git_have() {
+            return;
+        }
+        let ws = temp_ws("cpempty");
+        let w = ws.path();
+        // 不 git init——复刻真实场景：测 工作区就不是 git 仓库，走整目录扫分支
+        // 工作区全空时拍任务起点 → 必须落一个空树提交（不能再当「无变更」跳过）
+        let cp1 = checkpoint(w, "任务起点", "sess-empty").unwrap().expect("空起步也要有基线");
+        std::fs::write(w.join("index.html"), "<html></html>").unwrap();
+        let cp2 = checkpoint(w, "做完了", "sess-empty").unwrap().expect("新文件应有变更");
+        let files = changed_files(w, RepoOrigin::Shadow, &cp1.id).unwrap();
+        assert!(
+            files.iter().any(|f| f.status == 'A' && f.path == "index.html"),
+            "相对空起点，会话产出要如实显示为新增: {files:?}"
+        );
+        let _ = cp2;
     }
 
     /// 2026-10-31 用户实锤「产物不是当前工作区的」根因回归：默认 `git add` 忽略工作区
