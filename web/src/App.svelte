@@ -2149,12 +2149,16 @@
     let usedBaseline = false;
     try {
       let r = await fetch('/api/changes?origin=workspace').then((x) => x.json());
-      if (r.error && /不在 git 仓库|not a git repository/i.test(String(r.error))) {
+      // 非 git 工作区 / 仓库还没有任何提交（无 HEAD）→ 退回影子基线（会话起点）。
+      // 判据要认 git 的真实报错原文（2026-10-31 实锤：只认「不在 git 仓库」漏掉了
+      // 「git diff --numstat HEAD 失败: ambiguous argument 'HEAD'」，空仓库直接白屏）。
+      const errText = String(r.error || '');
+      if (errText && /不在 git 仓库|not a git repository|unknown revision|ambiguous argument|does not have any commits/i.test(errText)) {
         // 非 git 工作区兜底：退回影子基线（会话起点）
         const { id: baseline, note } = await resolveBaseline({ sessionFirst: true });
         if (!baseline) {
           rpFiles = [];
-          rpArtifactsNote = note || '本任务还没有产物。';
+          rpArtifactsNote = note || '这个工作区不是 git 仓库，也没有会话检查点——产物清单用不了。';
           rpLoading = false;
           return;
         }
