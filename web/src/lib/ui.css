@@ -88,59 +88,10 @@ body {
   margin: 0;
   background: var(--g1);
   color: var(--g7);
-  /* 035 件 2：Inter 本地打包在前，跨机一致；中文继续系统字体（字体包体积不值） */
-  font-family: 'Inter Variable', -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
-
-/* —— 035 件 4：设计令牌打底（抄自 Open Props，MIT；登记见 THIRD-PARTY_NOTICES.md）——
-   只供新样式使用，不做全量视觉替换（上次「视觉刷新」被回退的教训） */
-:root {
-  --font-mono: 'JetBrains Mono Variable', Consolas, 'Cascadia Mono', monospace;
-  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
-  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-spring: linear(0, 0.007 1.5%, 0.619 9.6%, 0.977 16.7%, 1.21 24.1%, 1.316 30.9%, 1.345 37.7%, 1.287 47.1%, 1.088 60.1%, 1.016 76.4%, 1);
-  --shadow-1: 0 1px 2px -1px rgb(0 0 0 / 0.2), 0 3px 8px -2px rgb(0 0 0 / 0.14);
-  --shadow-2: 0 2px 6px -2px rgb(0 0 0 / 0.25), 0 10px 24px -4px rgb(0 0 0 / 0.18);
-  --shadow-3: 0 4px 10px -4px rgb(0 0 0 / 0.3), 0 20px 48px -8px rgb(0 0 0 / 0.25);
-}
-
-/* —— 035 件 1：Shiki 双主题——token 颜色走 CSS 变量，按 data-theme 翻转，切换不重新高亮 */
-[data-theme='dark'] .md-codeblock code span { color: var(--shiki-dark, currentColor); }
-[data-theme='light'] .md-codeblock code span { color: var(--shiki-light, currentColor); }
-.md-codeblock code.shiki-code {
-  font-family: var(--font-mono);
-}
-
-/* —— 035 件 4：滚动条美化（纯 CSS，OverlayScrollbars 已回滚——它重构滚动容器 DOM，
-   与宿主 scrollTop 上的自动跟随/钉底判定冲突，真人滚轮实测划不动）。
-   只动「皮」：宽度/圆角/配色，滚动行为原生。深浅主题各一套 */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: var(--g4);
-  border-radius: 99px;
-  border: 3px solid transparent;
-  background-clip: content-box;
-}
-::-webkit-scrollbar-thumb:hover {
-  background-color: var(--g5);
-}
-
-/* —— 035 件 3：图标线宽统一到 1.8（CSS 覆盖呈现属性，形状零改动）。
-   Lucide（ISC）为图标字典与参考线宽；数据图形不在此列（.ctx-ring 圆环保自己的线宽） */
-.nav-ico, .att-ico, .caret-ico, .sel-check, .process-ico, .ctx-search,
-.web-globe, .tool-caret, .think-caret, .side-search, .rv-fico, .rv-chev,
-.rp-tab-ico, .icon-btn svg, .foot-btn svg, .head-side svg {
-  stroke-width: 1.8;
-}
-
 
 #app {
   height: 100vh;

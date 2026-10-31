@@ -507,7 +507,7 @@
   .agents-editor {
     width: 100%;
     box-sizing: border-box;
-    font-family: var(--font-mono);
+    font-family: Consolas, 'Courier New', monospace;
     font-size: 12.5px;
     line-height: 1.7;
     background: var(--g1);
@@ -545,7 +545,7 @@
     padding: 1px 6px;
   }
   .mcp-cmd {
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     font-size: 11px;
     color: var(--g5);
     margin: 6px 0;

@@ -1,7 +1,4 @@
 import './lib/ui.css';
-// 字体本地打包（035 件 2）：Inter 正文 / JetBrains Mono 代码，变量字体离线可用
-import '@fontsource-variable/inter';
-import '@fontsource-variable/jetbrains-mono';
 import { mount } from 'svelte';
 import App from './App.svelte';
 

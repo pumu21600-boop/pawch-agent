@@ -9,11 +9,6 @@
   import ImagePreview from './lib/ImagePreview.svelte';
   // 助手消息 markdown 渲染（2026-10-04 用户拍板「星号太多」：escape-first 安全渲染）
   import { md } from './lib/md.js';
-  // 代码高亮（035 件 1）：懒加载 Shiki，渲染后处理里喂 .md-codeblock，md 管线不动
-  import { enhanceCodeBlocks } from './lib/highlight.js';
-  // OverlayScrollbars 已回滚（035 补丁）：它会重构滚动容器 DOM（宿主 overflow:hidden +
-  // 自建视口），与全仓写死在宿主 scrollTop 上的自动跟随/钉底判定根本冲突，真人滚轮
-  // 实测划不动。滚动条美化回归纯 CSS（ui.css ::-webkit-scrollbar）。
   // 聊天展示层纯逻辑（2026-10-30 UI 轮）：分段/合并/工具人话化。
   // 不碰 DOM，Node 单测见 web/test/chat.test.mjs（npm test / CI 门禁）。
   import {
@@ -521,8 +516,6 @@
     if (!dragging && chatPinned && chatBody) chatBody.scrollTop = chatBody.scrollHeight;
     // 单元素微调标记：Svelte 重渲染会重建节点，这里按存下的路径补盖 data-mt
     if (!dragging) stampMicroUids();
-    // 代码高亮（035 件 1）：内部自带去重与 150ms 防抖，空转成本是一次 querySelector
-    if (!dragging) enhanceCodeBlocks(chatBody);
   });
 
   function onChatScroll() {
@@ -8525,7 +8518,7 @@
     background: #101216;
     color: #d4d4d4;
     border-top: 1px solid var(--g3);
-    font-family: var(--font-mono);
+    font-family: Consolas, 'Cascadia Mono', monospace;
     font-size: 12.5px;
   }
   .term-resize {
@@ -9274,7 +9267,7 @@
     border-radius: 8px;
     background: var(--g1);
     color: var(--g6);
-    font: 12.5px/1.55 var(--font-mono);
+    font: 12.5px/1.55 Consolas, "Cascadia Code", monospace;
     resize: none;
     outline: none;
   }
@@ -9317,7 +9310,7 @@
     border-radius: 6px;
     background: transparent;
     color: var(--g6);
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     font-size: 12.5px;
     cursor: pointer;
     overflow: hidden;
@@ -9343,7 +9336,7 @@
     background: var(--g1);
     border-bottom: 1px solid var(--g2);
     color: var(--g5);
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     font-size: 11.5px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -9356,7 +9349,7 @@
     border: 1px solid var(--g3);
     border-radius: 8px;
     color: var(--g6);
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     font-size: 12px;
     /* 代码按词换行，不从单词中间劈开（原来 break-all 会把 SECURITY 拆成两行） */
     white-space: pre-wrap;
@@ -9413,7 +9406,7 @@
     margin-bottom: 4px;
   }
   .micro-sel {
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     font-size: 10.5px;
     color: var(--g5);
     margin-bottom: 8px;
@@ -9455,7 +9448,7 @@
   }
   .micro-val {
     color: var(--g6);
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     font-size: 11px;
     min-width: 52px;
   }
@@ -9813,7 +9806,7 @@
     border: 1px solid color-mix(in srgb, var(--g3) 70%, transparent);
     border-radius: 5px;
     padding: 1px 5px;
-    font: 12.5px/1.5 var(--font-mono);
+    font: 12.5px/1.5 Consolas, 'Cascadia Code', monospace;
     color: var(--g7);
   }
   /* 代码块：独立卡片 + 语言标签 + 复制按钮（md.js 生成结构，点击委托在 onContentClick） */
@@ -9881,7 +9874,7 @@
     font-weight: 600;
   }
   .content :global(.md-pre code) {
-    font: 12.5px/1.7 var(--font-mono);
+    font: 12.5px/1.7 Consolas, 'Cascadia Code', monospace;
     white-space: pre;
   }
   /* 模型把 <tool_call> 协议当正文吐出来的历史消息：折叠成可展开块，不铺满屏幕 */
@@ -9910,7 +9903,7 @@
     border-top: 1px solid var(--g2);
     background: var(--g0);
     color: var(--g5);
-    font: 12px/1.6 var(--font-mono);
+    font: 12px/1.6 Consolas, 'Cascadia Code', monospace;
     white-space: pre-wrap;
     word-break: break-all;
   }
@@ -10378,7 +10371,7 @@
     white-space: nowrap;
     font-size: 12px;
     color: var(--g5);
-    font-family: var(--font-mono);
+    font-family: Consolas, 'Cascadia Code', monospace;
   }
   .tool-status {
     display: grid;
@@ -10446,7 +10439,7 @@
     border-radius: 6px;
     background: var(--g0);
     color: var(--g6);
-    font: 12px/1.6 var(--font-mono);
+    font: 12px/1.6 Consolas, 'Cascadia Code', monospace;
     white-space: pre-wrap;
     word-break: break-all;
     max-height: 200px;
@@ -10946,7 +10939,7 @@
   .rv-diff {
     margin: 0;
     padding: 8px 0;
-    font-family: var(--font-mono);
+    font-family: Consolas, 'Courier New', monospace;
     font-size: 12px;
     line-height: 1.6;
     min-width: max-content;
@@ -11184,7 +11177,7 @@
     margin-left: auto;
     font-size: 11px;
     color: var(--g5);
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     max-width: 180px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -11198,7 +11191,7 @@
     color: var(--g5);
   }
   .subagent-meta.dim {
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     opacity: 0.7;
   }
   .subagent-item-cancel,
@@ -11310,7 +11303,7 @@
   .computer-log-row {
     font-size: 11px;
     color: var(--g6);
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     padding: 4px 6px;
     background: var(--g2);
     border-radius: 5px;
@@ -11436,7 +11429,7 @@
     color: var(--tint-red-fg);
   }
   .model-pill {
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
   }
   .bar-dropdown {
     position: absolute;
@@ -11659,7 +11652,7 @@
     border-radius: 6px;
     background: transparent;
     color: var(--g6);
-    font-family: var(--font-mono);
+    font-family: Consolas, monospace;
     font-size: 12.5px;
     line-height: 1.5;
     cursor: pointer;
@@ -11803,7 +11796,7 @@
   .agents-editor {
     width: 100%;
     box-sizing: border-box;
-    font-family: var(--font-mono);
+    font-family: Consolas, 'Courier New', monospace;
     font-size: 12.5px;
     line-height: 1.7;
     background: var(--g1);
