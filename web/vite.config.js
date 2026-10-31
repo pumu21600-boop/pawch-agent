@@ -33,11 +33,17 @@ export default defineConfig({
     // 不影响任何运行时行为。
     rollupOptions: {
       output: {
-        manualChunks: {
-          // key 要用实际导入的说明符（静态 import 的是完整路径，不是包名）
-          svelte: ['svelte/internal'],
-          xlsx: ['xlsx/dist/xlsx.full.min.js'],
-          mammoth: ['mammoth/mammoth.browser.js'],
+        // Svelte 5（034 迁移轮）：legacy runtime 不再从 'svelte/internal' 桶口整包
+        // 导入（组件编译产物走 svelte/internal/client 等子路径），对象式 manualChunks
+        // 落成了空块、运行时混进 index 大块。改函数式按模块 id 分组，保持 2026-10-08
+        // 四块拆分的缓存结构：应用 / svelte 运行时 / xlsx / mammoth。
+        manualChunks(id) {
+          const p = id.replace(/\\/g, '/');
+          if (!p.includes('/node_modules/')) return undefined;
+          if (p.includes('/node_modules/svelte/')) return 'svelte';
+          if (p.includes('/node_modules/xlsx/')) return 'xlsx';
+          if (p.includes('/node_modules/mammoth/')) return 'mammoth';
+          return undefined;
         },
       },
     },

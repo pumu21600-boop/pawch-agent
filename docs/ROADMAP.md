@@ -254,3 +254,11 @@
 - **已引导提示可叉掉**：引导 chip 右侧加 ×，点了只移除这条提示（引导早已并入，不影响运行）。
 - **过滤孤立标点思考**：`isNoiseThinking()` 丢弃只含标点/空白的 reasoning 新段（渠道会在正文后补一个 "."），不再凭空多出「思考 · .」空块；已有思考段内的标点照常保留。
 - 测试：chat 单测 20 条（新增完成态折叠/标点过滤）；真机用注入 SSE 验证思考自动折叠、"." 不再出现、引导 × 可移除，完成态截图确认只剩「已工作…过程摘要」+ 结语。
+
+## 2026-10-31 Svelte 5 迁移轮（施工单 034）
+
+- **范围**：编译器 svelte 4.2.20→**5.57.3**、@sveltejs/vite-plugin-svelte 3.1.2→4.0.4（Vite 留 5.4.21）；全部组件**保持 legacy 语法零改写**（on: 407 / bind: 98 / `$:` 77 / dispatcher 12 原样），入口 main.js `new App({target})`→`mount(App, {target})`。
+- **分包**：Svelte 5 legacy runtime 走 `svelte/internal/client` 子路径，对象式 manualChunks 拼出 0 字节空块、运行时混进 index——改**函数式按模块 id 分组**，四块恢复（svelte 49.98k / index 358.87k / mammoth / xlsx）。
+- **警告面**：编译一次通过零报错；126 条警告全不拦构建——Svelte 5 新增 a11y 规则 116 条、css_unused 9 条（check_md_css 兜底）、1 条既有 `<tr>` 直挂 `<table>`（浏览器自动补 tbody，仅渲染未改）。
+- **真机**（隔离实例+mock 渠道，Tabbit DOM 断言）：mount 挂载/流式/思考/工具卡（人话化工具行）/错误横幅/设置 8 分区/自研下拉交互/右面板产物+网页页签/主题切换/星云 WebGL/刷新恢复全过；坑：临时实例缺 providers.json 会启动即退（报错仅前台可见）。
+- **闸**：npm test 23 过 + check_fetch 93 调用点 + check_md_css 15 类 + build 零报错。Svelte 5 生态（Bits UI / TanStack Virtual / shadcn-svelte 等）自此解锁，待 UI 优化轮逐件引入。
