@@ -6,15 +6,16 @@
   color-scheme: dark;
   scrollbar-color: var(--g4) transparent;
   /* P10.5 主题系统：变量由聚类脚本生成；dark=原视觉，light=翻转 */
-  /* P13 主题系统：中性色阶（无彩色倾向），侧栏/对话区/设置面板层级靠明度微差区分 */
-  --g0: #0e0e10;
-  --g1: #17171a;
-  --g2: #202024;
-  --g3: #2c2c31;
-  --g4: #3d3d44;
-  --g5: #777b85;
-  --g6: #a7abb5;
-  --g7: #f4f5f7;
+  /* P13 主题系统：中性色阶。2026-10-31 UI 改版（用户拍板「柔和 AI 风+浅暖橙」）：
+     灰阶换暖黑，层级仍靠明度微差区分 */
+  --g0: #151412;
+  --g1: #1c1a18;
+  --g2: #262320;
+  --g3: #332f2a;
+  --g4: #454039;
+  --g5: #8a8478;
+  --g6: #b8b3a9;
+  --g7: #f3f1ec;
   --overlay: rgba(0, 0, 0, 0.55);
   --veil: rgba(255, 255, 255, 0.07);
   --tint-blue-bg: #1f2c44;
@@ -39,25 +40,30 @@
   --tint-pink-fg: #f0a0c0;
   --tint-gray-bg: #26262b;
   --tint-gray-fg: #a7abb5;
-  /* 成熟化品牌强调色：单色系唯一行动色（发送/主按钮/用户气泡/激活态） */
-  --brand: #4f7cff;
-  --brand-hover: #3d6bf5;
+  /* 成熟化品牌强调色。2026-10-31 改版：浅暖橙（用户从效果图定的色）。
+     --brand=填充面（按钮渐变亮端/激活底/呼吸点），--brand-text=文字场景（深底上更清晰），
+     --brand-deep=渐变按钮暗端，--brand-ink=品牌底上的文字 */
+  --brand: #e18c6c;
+  --brand-hover: #e89a7d;
+  --brand-deep: #a95433;
+  --brand-text: #e8997c;
   --brand-ink: #ffffff;
 }
 
 [data-theme='light'] {
   color-scheme: light;
   scrollbar-color: var(--g4) transparent;
-  --g0: #f6f6f7;
-  --g1: #ffffff;
+  /* 2026-10-31 改版：中性色轻暖化，与深色暖黑同一气质 */
+  --g0: #f7f5f2;
+  --g1: #fffefc;
   /* g2 在深色里是「凸起面/次级描边」，浅色必须给淡灰而不是纯白，否则气泡描边、
      header 底边、模型 chip、按钮底色会全部隐形 */
-  --g2: #f0f0f2;
-  --g3: #e4e4e7;
-  --g4: #d4d4d8;
-  --g5: #7d7f88;
-  --g6: #4b4d55;
-  --g7: #17171a;
+  --g2: #f3f0eb;
+  --g3: #e7e2da;
+  --g4: #d9d3c9;
+  --g5: #87827a;
+  --g6: #56524b;
+  --g7: #1f1d1a;
   --overlay: rgba(15, 23, 42, 0.32);
   --veil: rgba(13, 18, 28, 0.05);
   --tint-red-bg: #fdeaea;
@@ -78,10 +84,12 @@
   --tint-pink-fg: #b0326c;
   --tint-gray-bg: #eceef2;
   --tint-gray-fg: #4a4f5e;
-  /* 成熟化品牌强调色：与深色主题同值，保证双主题行动色一致 */
-  --brand: #4f7cff;
-  --brand-hover: #3d6bf5;
-  --brand-ink: #ffffff;
+  /* 成熟化品牌强调色：浅色下文字场景用深一档保对比，按钮字用深棕（浅橙上白字对比不足） */
+  --brand: #e18c6c;
+  --brand-hover: #e89a7d;
+  --brand-deep: #c97a52;
+  --brand-text: #b45a37;
+  --brand-ink: #47220e;
 }
 
 body {
@@ -91,6 +99,25 @@ body {
   font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
+}
+/* 2026-10-31 UI 改版：聊天区背后的品牌色极淡光晕（两层径向渐变，静态不动）。
+   侧栏/顶栏/右面板是实色面会自然盖住它，只在透明的聊天流上下缘透出；
+   壁纸模式下让位给壁纸；浅色主题减淡。 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(680px 440px at 50% -12%, color-mix(in srgb, var(--brand) 9%, transparent), transparent 62%),
+    radial-gradient(760px 520px at 50% 112%, color-mix(in srgb, var(--brand) 6%, transparent), transparent 64%);
+}
+body.has-wallpaper::before {
+  content: none;
+}
+[data-theme='light'] body::before {
+  opacity: 0.55;
 }
 
 #app {
@@ -107,6 +134,7 @@ body {
   font-size: 13px;
   font-weight: 550;
   cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, filter 0.15s ease;
 }
 .btn:hover {
   background: var(--g3);
@@ -115,16 +143,15 @@ body {
   opacity: 0.5;
   cursor: default;
 }
-/* 主按钮不搞亮底高亮：用略强的底色+描边+字重表达「主要动作」，两个主题下都不刺眼 */
+/* 2026-10-31 改版：主按钮换品牌橙渐变亮底（推翻 2026-09 的「不搞亮底」约定，用户看效果图拍板） */
 .btn.primary {
-  background: var(--g3);
-  border-color: var(--g5);
-  color: var(--g7);
+  background: linear-gradient(180deg, var(--brand), var(--brand-deep));
+  border-color: transparent;
+  color: var(--brand-ink);
   font-weight: 650;
 }
 .btn.primary:hover {
-  background: var(--g4);
-  border-color: var(--g6);
+  filter: brightness(1.06);
 }
 .btn.danger {
   background: var(--g2);

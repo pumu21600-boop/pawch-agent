@@ -7902,8 +7902,9 @@
     width: 30px;
     height: 30px;
     border-radius: 8px;
-    background: var(--g7);
-    color: var(--g0);
+    background: linear-gradient(135deg, var(--brand), var(--brand-deep));
+    color: #ffffff;
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--brand) 30%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -7937,11 +7938,11 @@
     flex: none;
   }
   .icon-btn:hover {
-    background: var(--g1);
+    background: var(--g2);
     color: var(--g7);
   }
   .icon-btn.on {
-    background: var(--g2);
+    background: var(--g3);
     color: var(--g7);
   }
   .icon-btn:disabled {
@@ -7961,14 +7962,15 @@
     height: 40px;
     border-radius: 10px;
     border: 1px solid var(--g3);
-    background: var(--g1);
+    background: var(--g2);
     color: var(--g7);
     font-size: 13.5px;
     font-weight: 600;
     cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
   }
   .new-chat:hover {
-    background: var(--g2);
+    background: var(--g3);
     border-color: var(--g4);
   }
   .new-chat:disabled {
@@ -8061,9 +8063,9 @@
     background: color-mix(in srgb, var(--err, #e5697a) 12%, transparent);
   }
   .m-btn.primary {
-    background: var(--g3);
-    color: var(--g7);
-    border-color: var(--g5);
+    background: linear-gradient(180deg, var(--brand), var(--brand-deep));
+    color: var(--brand-ink);
+    border-color: transparent;
     font-weight: 650;
   }
   .side-scroll {
@@ -8083,6 +8085,7 @@
     cursor: pointer;
     color: var(--g7);
     font-size: 15.5px;
+    transition: background 0.15s ease;
   }
   .proj:hover {
     background: var(--g1);
@@ -8183,12 +8186,13 @@
     cursor: pointer;
     color: var(--g6);
     font-size: 14.5px;
+    transition: background 0.15s ease, color 0.15s ease;
   }
   .conv:hover {
     background: var(--g1);
   }
   .conv.active {
-    background: var(--g2);
+    background: color-mix(in srgb, var(--brand) 11%, var(--g2));
     color: var(--g7);
   }
   .conv-pin {
@@ -8613,7 +8617,7 @@
     background: var(--g2);
   }
   .head-btn.active {
-    color: var(--brand);
+    color: var(--brand-text);
     border-color: var(--g3);
     background: var(--g2);
   }
@@ -9063,9 +9067,11 @@
     color: var(--g5);
     font-size: 13px;
     cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
   }
   .rp-tabs button:hover {
     color: var(--g7);
+    background: var(--g1);
   }
   .rp-tabs button.active {
     background: var(--g2);
@@ -9431,7 +9437,7 @@
   }
   .rp-file.sel {
     background: var(--g2);
-    color: var(--brand);
+    color: var(--brand-text);
   }
   /* 路径标签吸顶：代码滚动时它不跟着滚，也不会被裁掉半个字 */
   .rp-preview-path {
@@ -10027,7 +10033,7 @@
     margin: 16px 0;
   }
   .content :global(.md-a) {
-    color: var(--brand);
+    color: var(--brand-text);
     text-decoration: none;
     border-bottom: 1px solid color-mix(in srgb, var(--brand) 45%, transparent);
   }
@@ -10381,7 +10387,7 @@
     padding: 0 5px;
     border-radius: 4px;
     background: color-mix(in srgb, var(--brand) 12%, transparent);
-    color: var(--brand);
+    color: var(--brand-text);
     font-size: 10.5px;
   }
   /* 流式期间封顶 240px（不随吐字跳变）；读完后超长封顶 280。
@@ -10464,7 +10470,7 @@
     height: 13px;
   }
   .tool-ico.running {
-    color: var(--brand);
+    color: var(--brand-text);
   }
   .tool-name {
     flex: none;
@@ -11452,8 +11458,8 @@
     box-shadow: 0 4px 16px var(--overlay);
   }
   .composer:focus-within {
-    border-color: var(--g4);
-    box-shadow: 0 6px 20px var(--overlay);
+    border-color: color-mix(in srgb, var(--brand) 45%, var(--g3));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 12%, transparent), 0 6px 20px var(--overlay);
   }
   .composer-input {
     display: block;
@@ -11810,7 +11816,7 @@
     height: 34px;
     border-radius: 10px;
     border: none;
-    background: var(--brand);
+    background: linear-gradient(180deg, var(--brand), var(--brand-deep));
     color: var(--brand-ink);
     font-size: 16px;
     line-height: 1;
@@ -11819,9 +11825,12 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--brand) 30%, transparent);
+    transition: filter 0.15s ease, transform 0.15s ease;
   }
   .send-btn:hover:not(:disabled) {
-    background: var(--brand-hover);
+    filter: brightness(1.08);
+    transform: translateY(-1px);
   }
   .send-btn:disabled {
     background: var(--g3);
