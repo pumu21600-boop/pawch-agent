@@ -1194,7 +1194,7 @@
   let rpWarn = '';
   // 基线过期（2026-10-31 用户实锤「产物不是当前工作区的」）：stale 警告触发时任务档
   // 清单全是基线残留鬼影，不再展示，给「重新以当前状态为起点」按钮重拍
-  let rpStale = false;
+  let rpStale = false; // 已废弃：过期气泡机制整体撤除（2026-10-31），保留变量防旧引用报错
   let rvStale = false;
   let rpStaleCount = 0;
   let rvStaleCount = 0;
@@ -1268,13 +1268,11 @@
         rvError = r.error;
       } else {
         rvFiles = r.files || [];
-        rvWarn = r.warning || '';
-        // 基线过期同产物面板：隐藏鬼影清单，给重拍出口
-        rvStale = !!(r.warning && rvFiles.length);
-        if (rvStale) {
-          rvStaleCount = rvFiles.length;
-          rvFiles = [];
-        }
+        // 基线过期气泡已撤（2026-10-31 用户两次反馈「点了没用/一直留着」）：
+        // 删除类条目对「这个任务改了什么」没意义，静默过滤，不再打扰用户确认。
+        rvFiles = rvFiles.filter((f) => f.status !== 'D');
+        rvWarn = '';
+        rvStale = false;
       }
     } catch (e) {
       rvFiles = [];
@@ -2153,12 +2151,23 @@
       // 判据要认 git 的真实报错原文（2026-10-31 实锤：只认「不在 git 仓库」漏掉了
       // 「git diff --numstat HEAD 失败: ambiguous argument 'HEAD'」，空仓库直接白屏）。
       const errText = String(r.error || '');
-      if (errText && /不在 git 仓库|not a git repository|unknown revision|ambiguous argument|does not have any commits/i.test(errText)) {
+      if (errText) {
         // 非 git 工作区兜底：退回影子基线（会话起点）
-        const { id: baseline, note } = await resolveBaseline({ sessionFirst: true });
+        let { id: baseline, note } = await resolveBaseline({ sessionFirst: true });
+        if (!baseline) {
+          // 没有当前会话（刚打开应用、还没点进任何会话）也要能给个数：
+          // 退到工作区**最早**的检查点——它就是这批文件的起点。
+          try {
+            const all = await fetch('/api/checkpoints').then((x) => x.json());
+            const list = all.checkpoints || [];
+            if (list.length) baseline = list[list.length - 1].id;
+          } catch {
+            /* 拿不到就走下面的空态 */
+          }
+        }
         if (!baseline) {
           rpFiles = [];
-          rpArtifactsNote = note || '这个工作区不是 git 仓库，也没有会话检查点——产物清单用不了。';
+          rpArtifactsNote = note || '这个工作区不是 git 仓库，也没有检查点——产物清单用不了。';
           rpLoading = false;
           return;
         }
@@ -2166,15 +2175,15 @@
         r = await fetch(`/api/changes?baseline=${encodeURIComponent(baseline)}`).then((x) => x.json());
       }
       rpFiles = r.files || [];
-      rpWarn = usedBaseline ? r.warning || '' : '';
       if (usedBaseline) {
-        rpStale = !!(r.warning && rpFiles.length);
-        if (rpStale) {
-          rpStaleCount = rpFiles.length;
-          rpFiles = [];
-          rpArtifactsNote = '基线已过期，清单已隐藏。';
-        }
+        // 兜底路径（非 git 工作区）不再弹「基线过期」气泡（2026-10-31 用户两次反馈
+        // 「气泡点了没用/一直留着」）：直接只留**还在工作区里的东西**——
+        // 删除类条目(D) 在「这个会话产出了什么」这个语义下没有意义（文件都没了，
+        // 点开也是空的），静默丢掉即可，不必让用户确认。
+        rpFiles = rpFiles.filter((f) => f.status !== 'D');
       }
+      rpWarn = '';
+      rpStale = false;
       if (r.error) rpArtifactsNote = `读取失败: ${r.error}`;
     } catch (e) {
       rpFiles = [];
@@ -6960,22 +6969,8 @@
           {#each rpVisibleTabs as t (t.key)}
             <div class="rp-pane" class:hidden={t.key !== rpTab}>
               {#if t.kind === 'artifacts'}
-                {#if rpStale && !rpStaleClosed}
-                  <!-- 基线过期（2026-10-31 用户实锤）：一句话气泡，可关闭；失败就地可见 -->
-                  <div class="rp-stale-line" title={rpWarn}>
-                    <span class="rp-stale-t">基线已过期，已隐藏 {rpStaleCount} 个非当前工作区条目</span>
-                    <button class="rp-stale-go" on:click={rebaseline}>重新以当前状态为起点</button>
-                    {#if rpStaleErr}<span class="rp-stale-err">{rpStaleErr}</span>{/if}
-                    <button class="rp-stale-x" title="关闭提示" on:click={() => (rpStaleClosed = true)}>×</button>
-                  </div>
-                {:else if rpWarn && !rpStaleClosed}
-                  <!-- 与 git 面板同源的基线陈旧警告：目录被挪走造成的幽灵删除 -->
-                  <div class="rv-warn">{rpWarn}</div>
-                {/if}
                 {#if rpLoading}
                   <div class="trace-empty">加载中…</div>
-                {:else if rpStale && !rpStaleClosed}
-                  <!-- 气泡在上面，清单已隐藏 -->
                 {:else if !rpFiles.length}
                   <div class="rp-empty">{rpArtifactsNote || '本任务还没有产物。'}<br />agent 修改/创建文件后，这里会列出改动清单（相对本次任务起点）。</div>
                 {:else}
@@ -7037,18 +7032,6 @@
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12a7 7 0 1 1-2.05-4.95" /><path d="M19 3.5V7h-3.5" /></svg>
                     </button>
                   </div>
-                  {#if rvStale && !rvStaleClosed}
-                    <div class="rp-stale-line" title={rvWarn}>
-                      <span class="rp-stale-t">基线已过期，已隐藏 {rvStaleCount} 个非当前工作区条目</span>
-                      <button class="rp-stale-go" on:click={rebaseline}>重新以当前状态为起点</button>
-                      {#if rvStaleErr}<span class="rp-stale-err">{rvStaleErr}</span>{/if}
-                      <button class="rp-stale-x" title="关闭提示" on:click={() => (rvStaleClosed = true)}>×</button>
-                    </div>
-                  {:else if rvWarn}
-                    <!-- 基线陈旧警告（后端 stale_subtree_warning）：基线里的顶层目录
-                         已不在当前工作区，清单里它的「删除」很可能是目录被挪走造成的 -->
-                    <div class="rv-warn">{rvWarn}</div>
-                  {/if}
                   {#if rvSource === 'work' && gitInfo && gitInfo.is_repo && !gitMissing && rvFiles.length}
                     <!-- 提交盒：跟清单同档出现（未提交改动 = 暂存区），勾选即「这次提交带上它」 -->
                     <div class="commit-box">
@@ -7072,8 +7055,6 @@
                     <div class="trace-empty">加载中…</div>
                   {:else if rvError && !rvFiles.length}
                     <div class="rp-empty">{rvError}</div>
-                  {:else if rvStale && !rvStaleClosed}
-                    <!-- 气泡在上面，清单已隐藏 -->
                   {:else if !rvFiles.length}
                     <div class="rv-empty">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M8.5 12h7" /></svg>
@@ -10748,57 +10729,6 @@
     background: color-mix(in srgb, var(--tint-orange-fg) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--tint-orange-fg) 35%, transparent);
     border-radius: 6px;
-  }
-  /* 基线过期：一句话可关闭气泡（产物/git 两面板共用），重拍按钮内联、失败就地可见 */
-  .rp-stale-line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 8px 10px;
-    padding: 6px 10px;
-    font-size: 12px;
-    line-height: 1.5;
-    color: var(--tint-orange-fg);
-    background: color-mix(in srgb, var(--tint-orange-fg) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--tint-orange-fg) 30%, transparent);
-    border-radius: 8px;
-  }
-  .rp-stale-t {
-    flex: 1;
-    min-width: 0;
-  }
-  .rp-stale-go {
-    flex: none;
-    padding: 2px 8px;
-    font-size: 12px;
-    color: var(--g7);
-    background: var(--g3);
-    border: 1px solid var(--g4);
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .rp-stale-go:hover {
-    background: var(--g4);
-  }
-  .rp-stale-err {
-    flex: none;
-    color: var(--tint-red-fg);
-    font-size: 11.5px;
-  }
-  .rp-stale-x {
-    flex: none;
-    width: 18px;
-    height: 18px;
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: var(--g5);
-    font-size: 14px;
-    line-height: 1;
-    cursor: pointer;
-  }
-  .rp-stale-x:hover {
-    color: var(--g7);
   }
   .commit-msg {
     width: 100%;
